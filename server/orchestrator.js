@@ -39,6 +39,7 @@ export function applyPatch(model, patch) {
     const merged = [...(model.legs || [])];
     for (const legPatch of patch.legs) {
       const idx = legPatch.index;
+      if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 0) continue;
       merged[idx] = { ...(merged[idx] || {}), ...legPatch };
     }
     result.legs = merged;
@@ -56,7 +57,7 @@ function findPendingActivityType(leg) {
   const shown     = new Set(Object.keys(leg.shownActivityOffsets || {}));
   const pending = leg.activitiesBank.types.find(t => shown.has(t) && !confirmed.has(t));
   if (pending) return pending;
-  return leg.activitiesBank.types.find(t => !confirmed.has(t)) || null;
+  return leg.activitiesBank.types.find(t => !shown.has(t) && !confirmed.has(t)) || null;
 }
 
 // ── Action resolver ────────────────────────────────────────────────────────────
@@ -68,6 +69,11 @@ export function resolveAction(model) {
   if (phase === 'summary')        return { type: 'summary' };
   if (phase === 'itinerary')      return { type: 'itinerary' };
   if (phase === 'post_itinerary') return { type: 'post_itinerary' };
+
+  if (phase !== 'planning') {
+    console.warn(`[resolveAction] unrecognized phase: "${phase}"`);
+    return { type: 'gathering' };
+  }
 
   const leg = legs?.[currentLegIndex];
   if (!leg) return { type: 'gathering' };
