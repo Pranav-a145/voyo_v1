@@ -143,6 +143,8 @@ Rules for [TRIP_UPDATE]:
 - exitTransport.type for intermediate legs is "flight" if air travel, or "train"/"bus"/"ferry" if ground
 - If exitTransport.type is not "flight", set fetchNeeded: false
 - Only emit [TRIP_UPDATE] once the full trip shape is confirmed — do not emit partial information
+- CRITICAL: Never emit [TRIP_UPDATE] if you do not have the origin city from the user. "Unknown", "NYC", "New York" are only valid if the user has explicitly told you their departure city. If you don't have it, ask first. An origin of "Unknown" will break the flight search entirely.
+- CRITICAL: Never emit [TRIP_UPDATE] without: origin city (from user), destination, arrival date, departure date, group size, budget. If any of these are missing, keep asking — do not guess or use placeholders.
 - After emitting [TRIP_UPDATE], tell the traveler naturally you're pulling up flights
 
 ---

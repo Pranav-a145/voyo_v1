@@ -130,6 +130,14 @@ async function executeGathering({ model, messages, systemPrompt, sendFn }) {
   }
 
   const { tripType, origin, groupSize, budgetPerPerson, legs } = signals.tripUpdate;
+
+  // If Claude emitted [TRIP_UPDATE] without a real origin, ignore it and keep gathering
+  const resolvedOrigin = (origin && !/^unknown$/i.test(origin.trim())) ? origin : (model.origin || null);
+  if (!resolvedOrigin) {
+    console.warn('[gathering] [TRIP_UPDATE] emitted without origin — staying in gathering phase');
+    return { modelPatch: null, continue: false };
+  }
+
   const initialLegs = (legs || []).map((l, i) => ({
     index: i,
     city: l.city,
@@ -154,7 +162,7 @@ async function executeGathering({ model, messages, systemPrompt, sendFn }) {
 
   const modelPatch = {
     tripType: tripType || 'single',
-    origin: origin || model.origin,
+    origin: resolvedOrigin,
     groupSize: groupSize || model.groupSize,
     budgetPerPerson: budgetPerPerson || model.budgetPerPerson,
     phase: 'planning',
