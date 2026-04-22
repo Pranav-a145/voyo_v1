@@ -19,6 +19,7 @@ export function mergeTripModelPatch(prev, patch) {
     const merged = [...(prev.legs || [])]
     for (const legPatch of patch.legs) {
       const idx = legPatch.index
+      if (idx == null || !Number.isInteger(idx)) continue
       merged[idx] = { ...(merged[idx] || {}), ...legPatch }
     }
     result.legs = merged
@@ -56,6 +57,7 @@ export function deriveSessionCtx(tripModel) {
   if (!legs?.length) return null
 
   const cities = legs.map(l => l.city).filter(Boolean)
+  if (!cities.length) return null
   const firstLeg = legs[0]
   const lastLeg  = legs[legs.length - 1]
 
@@ -87,14 +89,19 @@ const SESSION_KEY = (id) => `voyo_trip_${id}`
 export function saveTripModelToSession(tripModel, sessionId) {
   try {
     sessionStorage.setItem(SESSION_KEY(sessionId), JSON.stringify(tripModel))
-  } catch {}
+  } catch (e) {
+    console.warn('[tripModel] save failed', e)
+  }
 }
 
 export function loadTripModelFromSession(sessionId) {
   try {
     const raw = sessionStorage.getItem(SESSION_KEY(sessionId))
     return raw ? JSON.parse(raw) : null
-  } catch { return null }
+  } catch (e) {
+    console.warn('[tripModel] load failed', e)
+    return null
+  }
 }
 
 export function clearTripModelFromSession(sessionId) {
