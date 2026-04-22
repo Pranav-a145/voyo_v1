@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { fetchFlights, fetchHotels, fetchActivities, sortFlightPoolByPreference, sortHotelPoolByStyle, hotelStyleQuery } from './fetchers.js';
+import { fetchFlights, fetchHotels, fetchActivities, sortFlightPoolByPreference } from './fetchers.js';
 import { streamClaude, streamClaudeSSE, extractAndStripBlocks, anthropic } from './streaming.js';
 import { buildSystemPrompt, buildLegContext } from './prompts.js';
 
