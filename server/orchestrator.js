@@ -355,6 +355,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
   }
   if (signals.change?.field === 'groupSize') {
     const newSize = parseInt(signals.change.value, 10);
+    if (isNaN(newSize) || newSize < 1) return { modelPatch: null, continue: false };
     sendFn({ type: 'marker', content: `[GROUP_SIZE_UPDATE]{"passengers":${newSize}}` });
     return { modelPatch: { groupSize: newSize, legs: [{ index: legIndex, hotelsBank: [] }] }, continue: true };
   }
@@ -498,6 +499,7 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
     const newOffset = offset + 2;
     const newShown = pool.slice(newOffset, newOffset + 2);
     if (newShown.length === 0) {
+      sendFn({ type: 'delta', text: `That's all the ${activityType} options I have for ${leg.city.split(',')[0]} — moving on to the next category.` });
       const updatedConfirmed = [...(leg.confirmedActivities || []), { activityType, skipped: true }];
       return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed }] }, continue: true };
     }
@@ -527,7 +529,7 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
   sendFn({ type: 'activity_confirmed', data: { activities: selectedActivities } });
 
   const updatedConfirmed = [...(leg.confirmedActivities || []), ...selectedActivities];
-  const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: offset };
+  const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: offset + currentShown.length };
 
   console.log(`[select_activity] leg ${legIndex} confirmed ${activityType}:`, selectedActivities.map(a => a.title));
   return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed, shownActivityOffsets: offsets }] }, continue: true };
