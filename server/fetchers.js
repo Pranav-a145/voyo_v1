@@ -33,7 +33,7 @@ export async function fetchFlights(origin, destination, departureDate, returnDat
     arrival_id: destination_code,
     outbound_date: departureDate,
     return_date: returnDate,
-    adults: '1',
+    adults: String(passengers),
     type: '1',
     api_key: process.env.SERPAPI_KEY,
   });
@@ -44,6 +44,10 @@ export async function fetchFlights(origin, destination, departureDate, returnDat
   console.log('Params:', Object.fromEntries(params));
 
   const res = await fetch(url);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`SerpAPI flights error ${res.status}: ${errText}`);
+  }
   const data = await res.json();
 
   console.log('─── fetchFlights RESPONSE (HTTP', res.status, ')────────────');
@@ -100,11 +104,9 @@ export function sortFlightPoolByPreference(pool, preference) {
   } else if (/expensive|premium|business|first.?class|luxury/.test(p)) {
     withPrice.sort((a, b) => b.price - a.price);
   } else if (/direct|non.?stop/.test(p)) {
-    pool.sort((a, b) => (a.stops ?? 99) - (b.stops ?? 99));
-    return pool;
+    return [...pool].sort((a, b) => (a.stops ?? 99) - (b.stops ?? 99));
   } else if (/fast|short|quick/.test(p)) {
-    pool.sort((a, b) => (a.duration_minutes ?? 9999) - (b.duration_minutes ?? 9999));
-    return pool;
+    return [...pool].sort((a, b) => (a.duration_minutes ?? 9999) - (b.duration_minutes ?? 9999));
   }
   return [...withPrice, ...noPrice];
 }
@@ -145,6 +147,10 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
   console.log('Params:', Object.fromEntries(params));
 
   const res = await fetch(url);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`SerpAPI hotels error ${res.status}: ${errText}`);
+  }
   const data = await res.json();
 
   console.log('─── fetchHotels RESPONSE (HTTP', res.status, ')─────────────');
