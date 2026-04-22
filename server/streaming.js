@@ -22,12 +22,12 @@ const STRIP_INLINE = [
 ];
 
 const START_TAGS = Object.keys(SUPPRESS);
-const MAX_TAG_LEN = Math.max(...START_TAGS.map(t => t.length));
+const MAX_TAG_LEN = Math.max(...[...START_TAGS, ...STRIP_INLINE].map(t => t.length));
 
 export function extractAndStripBlocks(text) {
   const toolCallRegex = /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]|\[TOOL_CALL\][\s\S]*$/g;
   const stateRegex    = /\[STATE\][\s\S]*?\[\/STATE\]|\[STATE\][\s\S]*$/g;
-  const newSignalRegex = /\[(TRIP_UPDATE|FETCH|ADVANCE|CONFIRM|CHANGE)\][\s\S]*?\[\/\1\]/g;
+  const newSignalRegex = /\[(TRIP_UPDATE|FETCH|ADVANCE|CONFIRM|CHANGE)\][\s\S]*?\[\/(?:TRIP_UPDATE|FETCH|ADVANCE|CONFIRM|CHANGE)\]|\[(TRIP_UPDATE|FETCH|ADVANCE|CONFIRM|CHANGE)\][\s\S]*$/g;
 
   let toolCall = null;
   for (const match of text.matchAll(/\[TOOL_CALL\]([\s\S]*?)\[\/TOOL_CALL\]/g)) {
