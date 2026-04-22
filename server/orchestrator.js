@@ -173,6 +173,7 @@ function formatTime(timeStr) {
   const parts = timeStr.split(' ');
   if (parts.length < 2) return null;
   const [h, m] = parts[1].split(':').map(Number);
+  if (isNaN(h) || isNaN(m)) return null;
   const ampm = h >= 12 ? 'pm' : 'am';
   const hour = h % 12 || 12;
   return `${hour}:${m.toString().padStart(2, '0')}${ampm}`;
@@ -187,8 +188,8 @@ async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legI
   const origin      = isExit ? leg.city : model.origin;
   const destination = isExit ? (model.legs[legIndex + 1]?.city || model.origin) : leg.city;
   const depDate     = isExit ? leg.departureDate : leg.arrivalDate;
-  const lastLeg     = model.legs[model.legs.length - 1];
-  const retDate     = lastLeg.departureDate;
+  const lastLeg     = model.legs.at(-1);
+  const retDate     = lastLeg?.departureDate ?? null;
 
   console.log(`[fetch_flights] leg ${legIndex} | ${origin} → ${destination} | ${depDate}`);
 
@@ -247,6 +248,7 @@ async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legI
   const flightOptions = shown.map(f => `${f.id}: ${f.airline} $${f.price}`).join(' | ');
 
   const legContext = buildLegContext(model);
+  // Non-streaming: we need the full text to extract [CONFIRM]/[CHANGE] signals before acting
   const chatText = await streamClaude(
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
