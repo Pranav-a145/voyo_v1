@@ -131,11 +131,13 @@ app.post('/api/chat', async (req, res) => {
     await executeRequest({ tripModel: model, messages, profile, sendFn: send })
   } catch (err) {
     console.error('[/api/chat] error:', err.message)
-    send({ type: 'error', message: 'Something went wrong. Please try again.' })
+    if (!res.writableEnded) send({ type: 'error', message: 'Something went wrong. Please try again.' })
+  } finally {
+    if (!res.writableEnded) {
+      send({ type: 'done' })
+      res.end()
+    }
   }
-
-  send({ type: 'done' })
-  res.end()
 })
 
 app.listen(PORT, () => {
