@@ -6,38 +6,10 @@ import TravelCards from '../components/TravelCards'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import ItineraryContent from '../components/ItineraryContent'
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function deriveTitleFromMarkers(markers) {
-  for (const m of (markers || [])) {
-    const match = (m.content || '').match(/\[FLIGHTS_SHOWN\] ({.+})/)
-    if (match) {
-      try {
-        const ctx = JSON.parse(match[1])
-        const dest = ctx.destination?.split(',')[0]?.trim() || ''
-        const dep  = ctx.departure ? new Date(ctx.departure + 'T12:00:00') : null
-        const ret  = ctx.return    ? new Date(ctx.return    + 'T12:00:00') : null
-        if (dest && dep && ret) {
-          const fmt = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-          return `${dest}, ${fmt(dep)}–${fmt(ret)}`
-        }
-        if (dest) return dest
-      } catch {}
-    }
-  }
-  return 'New Trip'
-}
-
-function extractCtxFromMarkers(markers) {
-  for (const m of (markers || [])) {
-    const match = (m.content || '').match(/\[FLIGHTS_SHOWN\] ({.+})/)
-    if (match) {
-      try { return JSON.parse(match[1]) } catch {}
-    }
-  }
-  return null
-}
+import {
+  initialTripModel, mergeTripModelPatch, deriveSessionTitle, deriveSessionCtx,
+  deriveSelectedCards, saveTripModelToSession, loadTripModelFromSession, migrateLegacySession,
+} from '../lib/tripModel'
 
 // ─── VOYO avatar icon ──────────────────────────────────────────────────────────
 
@@ -283,33 +255,33 @@ export default function Chat() {
   const sessionIdRef = useRef(isNew ? crypto.randomUUID() : routeSessionId)
   const sessionId = sessionIdRef.current
 
-  const [profile, setProfile]           = useState(null)
-  const [messages, setMessages]         = useState(prefilledDestination ? [] : [WELCOME_MESSAGE])
-  const [input, setInput]               = useState('')
-  const [streaming, setStreaming]       = useState(false)
-  const [waiting, setWaiting]           = useState(false)
-  const [fetching, setFetching]         = useState(false)
+  // ── Core state ────────────────────────────────────────────────────────────────
+  const [profile, setProfile]   = useState(null)
+  const [messages, setMessages] = useState(prefilledDestination ? [] : [WELCOME_MESSAGE])
+  const [input, setInput]       = useState('')
+  const [streaming, setStreaming] = useState(false)
+  const [waiting, setWaiting]   = useState(false)
+  const [fetching, setFetching] = useState(false)
   const [messageCards, setMessageCards] = useState({})
-  const [activityBank, setActivityBank] = useState(null)
-  const [selectedCards, setSelectedCards] = useState({ flights: [], hotels: [], activities: [] })
-  const [hiddenMarkers, setHiddenMarkers] = useState([])
-  const [flightsBankFull, setFlightsBankFull] = useState([])
-  const [hotelsBankFull, setHotelsBankFull]   = useState([])
-  const [sessionLoaded, setSessionLoaded]     = useState(isNew)
+
+  // Trip model — replaces activityBank, selectedCards, flightsBankFull, hotelsBankFull, hiddenMarkers
+  const [tripModel, setTripModel] = useState(initialTripModel)
+  const tripModelRef = useRef(initialTripModel())  // mutable ref for use inside async callbacks
 
   // Session UI state
-  const [sessionTitle, setSessionTitle] = useState('New Trip')
-  const [menuOpen, setMenuOpen]         = useState(false)
-  const [renaming, setRenaming]         = useState(false)
-  const [renameValue, setRenameValue]   = useState('')
+  const [sessionLoaded, setSessionLoaded] = useState(isNew)
+  const [sessionTitle, setSessionTitle]   = useState('New Trip')
+  const [menuOpen, setMenuOpen]           = useState(false)
+  const [renaming, setRenaming]           = useState(false)
+  const [renameValue, setRenameValue]     = useState('')
   const [showHowItWorks, setShowHowItWorks] = useState(
     () => localStorage.getItem('waypoint_how_it_works_dismissed') !== '1'
   )
 
   // Complete planning state
-  const [itineraryShown, setItineraryShown]   = useState(false)
-  const [completedSaved, setCompletedSaved]   = useState(false)
-  const [showSavedModal, setShowSavedModal]   = useState(false)
+  const [itineraryShown, setItineraryShown] = useState(false)
+  const [completedSaved, setCompletedSaved] = useState(false)
+  const [showSavedModal, setShowSavedModal] = useState(false)
   const [savedDestination, setSavedDestination] = useState('')
 
   const bottomRef    = useRef(null)
@@ -457,29 +429,25 @@ export default function Chat() {
     }
 
     const startsWithWelcome = nextMessages[0]?.role === 'assistant'
-    const apiMessages = [
-      ...hiddenMarkers,
-      ...nextMessages.slice(startsWithWelcome ? 1 : 0).map(({ role, content }) => ({ role, content })),
-    ]
+    const apiMessages = nextMessages
+      .slice(startsWithWelcome ? 1 : 0)
+      .map(({ role, content }) => ({ role, content }))
 
     const controller = new AbortController()
     abortRef.current = controller
 
-    let finalMessages    = nextMessages
-    let finalMarkers     = hiddenMarkers
-    let finalCards       = messageCards
-    let finalSelCards    = selectedCards
-    let finalActivityBank = activityBank
-    let finalFlightsBank  = flightsBankFull
-    let finalHotelsBank   = hotelsBankFull
+    let finalMessages  = nextMessages
+    let finalCards     = messageCards
+    let finalTripModel = tripModelRef.current
 
     try {
       const res = await fetch('http://localhost:5000/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          messages: apiMessages, profile, activityBank, selectedCards,
-          flightsBank: flightsBankFull, hotelsBank: hotelsBankFull,
+          messages: apiMessages,
+          profile,
+          tripModel: tripModelRef.current,
         }),
         signal: controller.signal,
       })
