@@ -483,19 +483,16 @@ export default function Chat() {
               finalMessages = updated
               return updated
             })
-          } else if (event.type === 'marker') {
-            const newMarkers = [...finalMarkers, { role: 'user', content: event.content }]
-            finalMarkers = newMarkers
-            setHiddenMarkers(newMarkers)
-            if (event.content.includes('[ITINERARY_SHOWN]')) setItineraryShown(true)
-          } else if (event.type === 'fetching') {
-            setFetching(true)
+
+          } else if (event.type === 'trip_model_update') {
+            const newModel = mergeTripModelPatch(finalTripModel, event.data)
+            finalTripModel = newModel
+            tripModelRef.current = newModel
+            setTripModel(newModel)
+            saveTripModelToSession(newModel, sessionId)
+
           } else if (event.type === 'knowledge_bank') {
             setFetching(false)
-            const newSelCards = { ...finalSelCards, flights: event.data.flights || [] }
-            finalSelCards = newSelCards
-            setSelectedCards(newSelCards)
-            if (event.data.flightsBankFull) { finalFlightsBank = event.data.flightsBankFull; setFlightsBankFull(event.data.flightsBankFull) }
             assistantText = ''
             setMessages(prev => {
               const newCards = { ...finalCards, [prev.length]: event.data }
@@ -504,12 +501,9 @@ export default function Chat() {
               finalMessages = [...prev, { role: 'assistant', content: '' }]
               return finalMessages
             })
+
           } else if (event.type === 'hotels_bank') {
             setFetching(false)
-            const newSelCards = { ...finalSelCards, hotels: event.data.hotels || [] }
-            finalSelCards = newSelCards
-            setSelectedCards(newSelCards)
-            if (event.data.hotelsBankFull) { finalHotelsBank = event.data.hotelsBankFull; setHotelsBankFull(event.data.hotelsBankFull) }
             assistantText = ''
             setMessages(prev => {
               const newCards = { ...finalCards, [prev.length - 1]: { hotels: event.data.hotels } }
@@ -517,9 +511,10 @@ export default function Chat() {
               setMessageCards(newCards)
               return prev
             })
+
           } else if (event.type === 'activity_bank_ready') {
-            finalActivityBank = event.data
-            setActivityBank(event.data)
+            // activity bank stored in tripModel via trip_model_update
+
           } else if (event.type === 'activities_bank') {
             setFetching(false)
             assistantText = ''
@@ -529,13 +524,7 @@ export default function Chat() {
               setMessageCards(newCards)
               return prev
             })
-          } else if (event.type === 'flight_confirmed') {
-            if (event.data.flight) { const ns = { ...finalSelCards, flights: [event.data.flight] }; finalSelCards = ns; setSelectedCards(ns) }
-          } else if (event.type === 'hotel_confirmed') {
-            if (event.data.hotel) { const ns = { ...finalSelCards, hotels: [event.data.hotel] }; finalSelCards = ns; setSelectedCards(ns) }
-          } else if (event.type === 'activity_confirmed') {
-            const ns = { ...finalSelCards, activities: [...finalSelCards.activities, ...(event.data.activities || [])] }
-            finalSelCards = ns; setSelectedCards(ns)
+
           } else if (event.type === 'itinerary_bank') {
             setMessages(prev => {
               const newCards = { ...finalCards, [prev.length - 1]: { ...event.data, isItinerary: true } }
@@ -543,8 +532,29 @@ export default function Chat() {
               setMessageCards(newCards)
               return prev
             })
+
+          } else if (event.type === 'flight_confirmed') {
+            // visual confirmation — tripModel already updated via trip_model_update
+
+          } else if (event.type === 'hotel_confirmed') {
+            // same
+
+          } else if (event.type === 'activity_confirmed') {
+            // same
+
+          } else if (event.type === 'fetching') {
+            setFetching(true)
+
+          } else if (event.type === 'marker') {
+            if (event.content?.includes('[ITINERARY_SHOWN]')) setItineraryShown(true)
+
+          } else if (event.type === 'fetch_error') {
+            setFetching(false)
+            console.error('[fetch_error] leg:', event.leg, 'type:', event.fetchType)
+
           } else if (event.type === 'done') {
             setFetching(false)
+
           } else if (event.type === 'error') {
             setFetching(false)
             setMessages(prev => {
@@ -571,7 +581,7 @@ export default function Chat() {
       // Auto-save after every exchange
       clearTimeout(saveTimerRef.current)
       saveTimerRef.current = setTimeout(() => {
-        saveSession(finalMessages, finalMarkers, finalCards, finalSelCards, finalActivityBank, finalFlightsBank, finalHotelsBank)
+        saveSession(finalMessages, finalCards, finalTripModel)
       }, 600)
     }
   }
