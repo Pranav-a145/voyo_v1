@@ -6,8 +6,8 @@ export function buildSystemPrompt(profile) {
   const groupSize      = p.group_size      || 'not specified';
   const preferences    = (p.preferences || []).join(', ') || 'not specified';
   const aboutMe        = p.about_me?.trim() || null;
-  const age            = p.age            || null;
-  const gender         = p.gender         || null;
+  const age            = p.age            ?? null;
+  const gender         = p.gender         ?? null;
   const pastTrips      = (p.past_trips || [])
     .filter(t => t.destination?.trim())
     .map(t => {
