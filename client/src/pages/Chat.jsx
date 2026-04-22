@@ -274,9 +274,7 @@ export default function Chat() {
   const [menuOpen, setMenuOpen]           = useState(false)
   const [renaming, setRenaming]           = useState(false)
   const [renameValue, setRenameValue]     = useState('')
-  const [showHowItWorks, setShowHowItWorks] = useState(
-    () => localStorage.getItem('waypoint_how_it_works_dismissed') !== '1'
-  )
+  const [showHowItWorks, setShowHowItWorks] = useState(false)
 
   // Complete planning state
   const [itineraryShown, setItineraryShown] = useState(false)
@@ -332,7 +330,12 @@ export default function Chat() {
   useEffect(() => {
     if (!user) return
     supabase.from('profiles').select('*').eq('id', user.id).single()
-      .then(({ data }) => { if (data) setProfile(data) })
+      .then(({ data }) => {
+        if (data) {
+          setProfile(data)
+          setShowHowItWorks(!data.how_it_works_dismissed)
+        }
+      })
   }, [user])
 
   // ── Auto-scroll ────────────────────────────────────────────────────────────
@@ -438,8 +441,8 @@ export default function Chat() {
     setWaiting(true)
     setStreaming(true)
     if (showHowItWorks) {
-      localStorage.setItem('waypoint_how_it_works_dismissed', '1')
       setShowHowItWorks(false)
+      supabase.from('profiles').upsert({ id: user.id, how_it_works_dismissed: true })
     }
 
     const startsWithWelcome = nextMessages[0]?.role === 'assistant'
@@ -668,8 +671,8 @@ export default function Chat() {
       <div className="flex-1 overflow-y-auto py-6 space-y-5" onClick={() => setMenuOpen(false)}>
         {showHowItWorks && (
           <HowItWorksCard onDismiss={() => {
-            localStorage.setItem('waypoint_how_it_works_dismissed', '1')
             setShowHowItWorks(false)
+            supabase.from('profiles').upsert({ id: user.id, how_it_works_dismissed: true })
           }} />
         )}
         {messages.map((msg, i) => {
