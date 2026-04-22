@@ -583,7 +583,7 @@ function buildTripSummaryContext(model) {
       durationNights: l.durationNights,
       confirmedFlight: l.confirmedFlight ? { airline: l.confirmedFlight.airline, price: l.confirmedFlight.price } : null,
       confirmedHotel: l.confirmedHotel ? { name: l.confirmedHotel.name, price: l.confirmedHotel.price } : null,
-      confirmedActivities: (l.confirmedActivities || []).filter(a => !a.skipped).map(a => a.title),
+      confirmedActivities: (l.confirmedActivities || []).filter(a => !a.skipped).map(a => a.title).filter(Boolean),
       exitTransport: l.exitTransport?.confirmedFlight
         ? { airline: l.exitTransport.confirmedFlight.airline }
         : { type: l.exitTransport?.type },
@@ -594,23 +594,32 @@ function buildTripSummaryContext(model) {
 async function executeSummary({ model, messages, systemPrompt, sendFn }) {
   const ctx = buildTripSummaryContext(model);
 
-  await streamClaudeSSE(systemPrompt, [
-    ...messages,
-    { role: 'user', content: `[PRE_ITINERARY_SUMMARY]\nConfirmed trip: ${JSON.stringify(ctx)}\n\nAll legs planned. Give the traveler a clean summary of everything locked in across all legs: each arrival and exit flight (airline, route, time, price), each hotel (name, price/night), all must-sees and hidden gems per city, all confirmed activity venues per city. End with: "Does everything look good to you? If you're happy with the plan, I'll build your full day-by-day itinerary right now — or just let me know if you'd like to swap anything out."` },
-  ], sendFn);
+  if (!model.summaryShown) {
+    // First turn: stream the summary, wait for user response
+    await streamClaudeSSE(systemPrompt, [
+      ...messages,
+      { role: 'user', content: `[PRE_ITINERARY_SUMMARY]\nConfirmed trip: ${JSON.stringify(ctx)}\n\nAll legs planned. Give the traveler a clean summary of everything locked in across all legs: each arrival and exit flight (airline, route, time, price), each hotel (name, price/night), all must-sees and hidden gems per city, all confirmed activity venues per city. End with: "Does everything look good to you? If you're happy with the plan, I'll build your full day-by-day itinerary right now — or just let me know if you'd like to swap anything out."` },
+    ], sendFn);
 
-  // Non-streaming second call to detect itinerary approval
-  const chatText = await streamClaude(systemPrompt, [
-    ...messages,
-    { role: 'user', content: `[ITINERARY_STAGE] The traveler has seen the full summary. If they approve — emit [ITINERARY_CONFIRMED]. Only stay if they want to change something specific.` },
-  ]);
+    sendFn({ type: 'marker', content: '[PRE_ITINERARY_SUMMARY_SHOWN]' });
+    return { modelPatch: { summaryShown: true }, continue: false };
+  }
+
+  // Second turn: user has responded — detect approval from their actual message
+  // Non-streaming: need full text to check [ITINERARY_CONFIRMED] signal
+  const chatText = await streamClaude(
+    systemPrompt,
+    [
+      ...messages,
+      { role: 'user', content: `[ITINERARY_STAGE] The traveler has responded to the pre-itinerary summary. Read their message.\n\n- If they approve (say it looks good, yes, let's do it, etc.) — emit [ITINERARY_CONFIRMED].\n- If they want to change something — acknowledge and help them, do NOT emit [ITINERARY_CONFIRMED].` },
+    ]
+  );
 
   const signals = extractSignals(chatText);
   const { cleaned } = extractAndStripBlocks(chatText);
 
   if (!signals.itineraryConfirmed) {
     if (cleaned) sendFn({ type: 'delta', text: cleaned });
-    sendFn({ type: 'marker', content: '[PRE_ITINERARY_SUMMARY_SHOWN]' });
     return { modelPatch: null, continue: false };
   }
 
@@ -684,13 +693,14 @@ export async function executeRequest({ tripModel, messages, profile, sendFn }) {
 
   let continueLoop = true;
   let iterations = 0;
-  const MAX_ITERATIONS = 10;
+  const MAX_ITERATIONS = 30; // 3-city trip has ~20 advance/transition iterations alone
 
   while (continueLoop && iterations < MAX_ITERATIONS) {
     iterations++;
     const action = resolveAction(model);
     console.log(`[orchestrator] iteration ${iterations} | action: ${action.type}`);
 
+    // Errors propagate to the route handler in index.js which catches and sends { type: 'error' }
     const result = await executeAction({ action, model, messages, systemPrompt, sendFn });
 
     if (result.modelPatch) {
