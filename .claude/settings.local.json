@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Read(//c/Users/Pranav/.claude/skills/ui-ux-pro-max/**)",
+      "Bash(python3 scripts/search.py \"travel planning AI SaaS productivity minimal clean\" --design-system -p \"Waypoint\" -f markdown)",
+      "Bash(python scripts/search.py \"travel planning AI SaaS productivity minimal clean\" --design-system -p \"Waypoint\" -f markdown)",
+      "Bash(cmd.exe /c \"python --version\")",
+      "Bash(cmd.exe /c \"python3 --version\")",
+      "PowerShell(python --version; $env:PATH)",
+      "Bash(python3 scripts/search.py \"travel planning productivity SaaS modern minimal\" --design-system -p \"Waypoint\" -f markdown)",
+      "Bash(python3 \"C:/Users/Pranav/.claude/skills/ui-ux-pro-max/scripts/search.py\" \"travel planning productivity SaaS modern minimal\" --design-system -p \"Waypoint\" -f markdown)",
+      "Read(//c/Users/Pranav/AppData/Local/Programs/Python/**)",
+      "Read(//c//**)",
+      "Bash(where python *)",
+      "Read(//c/Users/Pranav/AppData/Local/Programs//**)",
+      "Bash(/c/Users/Pranav/AppData/Local/Programs/Python/Python312/python.exe *)",
+      "Read(//c/Users/Pranav/.claude/src/ui-ux-pro-max/**)",
+      "Bash(\"/c/Users/Pranav/AppData/Local/Programs/Python/Python312/python.exe\" \"C:/Users/Pranav/.claude/src/ui-ux-pro-max/scripts/search.py\" \"travel planning productivity SaaS modern minimal\" --design-system -p \"Waypoint\" -f markdown)",
+      "Bash(npm run *)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:claude.com)",
+      "Bash(robocopy C:\\\\Users\\\\Pranav\\\\Desktop\\\\waypoint *)"
+    ]
+  }
+}

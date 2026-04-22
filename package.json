@@ -1,0 +1,13 @@
+{
+  "name": "waypoint",
+  "version": "1.0.0",
+  "description": "Full-stack travel planning app",
+  "scripts": {
+    "client": "npm run dev --prefix client",
+    "server": "npm run dev --prefix server",
+    "dev": "concurrently \"npm run server\" \"npm run client\""
+  },
+  "dependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
