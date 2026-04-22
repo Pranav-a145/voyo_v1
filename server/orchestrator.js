@@ -118,3 +118,166 @@ export function resolveAction(model) {
       return { type: 'gathering' };
   }
 }
+
+// ── Gathering phase executor ───────────────────────────────────────────────────
+
+async function executeGathering({ model, messages, systemPrompt, sendFn }) {
+  const fullText = await streamClaudeSSE(systemPrompt, messages, sendFn);
+  const signals = extractSignals(fullText);
+
+  if (!signals.tripUpdate) {
+    return { modelPatch: null, continue: false };
+  }
+
+  const { tripType, origin, groupSize, budgetPerPerson, legs } = signals.tripUpdate;
+  const initialLegs = (legs || []).map((l, i) => ({
+    index: i,
+    city: l.city,
+    arrivalDate: l.arrivalDate,
+    departureDate: l.departureDate,
+    durationNights: l.durationNights,
+    hotelStyle: l.hotelStyle || null,
+    activityPreferences: l.activityPreferences || [],
+    flightsBank: [],
+    hotelsBank: [],
+    activitiesBank: null,
+    confirmedFlight: null,
+    confirmedHotel: null,
+    confirmedActivities: [],
+    mustSees: [],
+    mustSeesShown: false,
+    mustSeesConfirmed: false,
+    shownActivityOffsets: {},
+    exitTransport: l.exitTransport || { type: 'flight', fetchNeeded: true, flightsBank: [], confirmedFlight: null },
+    step: 'arrival_flight',
+  }));
+
+  const modelPatch = {
+    tripType: tripType || 'single',
+    origin: origin || model.origin,
+    groupSize: groupSize || model.groupSize,
+    budgetPerPerson: budgetPerPerson || model.budgetPerPerson,
+    phase: 'planning',
+    currentLegIndex: 0,
+    legs: initialLegs,
+  };
+
+  console.log('[gathering] trip scaffolded:', tripType, initialLegs.length, 'legs');
+  return { modelPatch, continue: true };
+}
+
+// ── Flight time formatter ──────────────────────────────────────────────────────
+
+function formatTime(timeStr) {
+  if (!timeStr) return null;
+  const parts = timeStr.split(' ');
+  if (parts.length < 2) return null;
+  const [h, m] = parts[1].split(':').map(Number);
+  const ampm = h >= 12 ? 'pm' : 'am';
+  const hour = h % 12 || 12;
+  return `${hour}:${m.toString().padStart(2, '0')}${ampm}`;
+}
+
+// ── Fetch flights for a leg ────────────────────────────────────────────────────
+
+async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legIndex, isExit = false }) {
+  const leg = model.legs[legIndex];
+  sendFn({ type: 'fetching' });
+
+  const origin      = isExit ? leg.city : model.origin;
+  const destination = isExit ? (model.legs[legIndex + 1]?.city || model.origin) : leg.city;
+  const depDate     = isExit ? leg.departureDate : leg.arrivalDate;
+  const lastLeg     = model.legs[model.legs.length - 1];
+  const retDate     = lastLeg.departureDate;
+
+  console.log(`[fetch_flights] leg ${legIndex} | ${origin} → ${destination} | ${depDate}`);
+
+  const flightsRaw = await fetchFlights(origin, destination, depDate, retDate, model.groupSize || 1)
+    .catch(e => { console.error('[fetch_flights] error:', e.message); return []; });
+
+  const preference = isExit ? leg.exitTransport?.flightPreference : leg.flightPreference;
+  const sorted = preference ? sortFlightPoolByPreference(flightsRaw, preference) : flightsRaw;
+  const flights = sorted.map((f, i) => ({ ...f, id: isExit ? `exit_flight_${legIndex}_${i}` : `flight_${legIndex}_${i}` }));
+
+  const selText = await streamClaude(systemPrompt, [
+    ...messages,
+    { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ flights }, null, 2)}\n[/KNOWLEDGE_BANK]\n\nDo not respond to the user yet. Output only [SELECTED_FLIGHTS]{"ids":["id1","id2","id3"]}[/SELECTED_FLIGHTS] picking the top 3. Nothing else.` },
+  ]);
+
+  let flightCards = flights.slice(0, 3);
+  const selM = selText.match(/\[SELECTED_FLIGHTS\]([\s\S]*?)\[\/SELECTED_FLIGHTS\]/);
+  if (selM) {
+    try {
+      const { ids } = JSON.parse(selM[1].trim());
+      const idMap = Object.fromEntries(flights.map(f => [f.id, f]));
+      const ordered = ids.map(id => idMap[id]).filter(Boolean);
+      if (ordered.length > 0) flightCards = ordered;
+    } catch {}
+  }
+
+  const flightCardsReadable = flightCards.map(f => ({
+    ...f, human_readable_departure: formatTime(f.departure_time), human_readable_arrival: formatTime(f.arrival_time),
+  }));
+
+  const legContext = buildLegContext(model);
+  await streamClaudeSSE(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'assistant', content: isExit ? `Let me find the best options to get you from ${leg.city.split(',')[0]} to ${destination.split(',')[0]}.` : "Let me pull up the best flights for you!" },
+      { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ flights: flightCardsReadable }, null, 2)}\n[/KNOWLEDGE_BANK]\n\n[FLIGHTS_SHOWN]\n\nPresent ONLY these 3 flights using their exact details. Ask which one they prefer.` },
+    ],
+    sendFn
+  );
+
+  const modelPatch = isExit
+    ? { legs: [{ index: legIndex, exitTransport: { ...leg.exitTransport, flightsBank: flights, shownFlights: flightCards } }] }
+    : { legs: [{ index: legIndex, flightsBank: flights, shownFlights: flightCards }] };
+
+  sendFn({ type: 'knowledge_bank', data: { flights: flightCards, hotels: [], activities: [], flightsBankFull: flights } });
+  return { modelPatch, continue: false };
+}
+
+// ── Select flight (user is choosing) ──────────────────────────────────────────
+
+async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legIndex, isExit = false }) {
+  const leg = model.legs[legIndex];
+  const bank = isExit ? (leg.exitTransport?.flightsBank || []) : (leg.flightsBank || []);
+  const shown = isExit ? (leg.exitTransport?.shownFlights || bank.slice(0, 3)) : (leg.shownFlights || bank.slice(0, 3));
+  const flightOptions = shown.map(f => `${f.id}: ${f.airline} $${f.price}`).join(' | ');
+
+  const legContext = buildLegContext(model);
+  const chatText = await streamClaude(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `[FLIGHT_STAGE] The traveler has been shown these flight options: ${flightOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge it warmly, emit [CONFIRM]{"leg":${legIndex},"type":"${isExit ? 'exit_flight' : 'flight'}","id":"<exact_id>"}[/CONFIRM], emit [FLIGHT_CONFIRMED].\n- If they want DIFFERENT or MORE flights — emit [CHANGE]{"leg":${legIndex},"field":"${isExit ? 'exitTransport.flightPreference' : 'flightPreference'}","value":"<their preference>"}[/CHANGE] and acknowledge.\n- If genuinely undecided, help them decide.` },
+    ]
+  );
+
+  const signals = extractSignals(chatText);
+  const { cleaned: chatCleaned } = extractAndStripBlocks(chatText);
+  if (chatCleaned) sendFn({ type: 'delta', text: chatCleaned });
+
+  if (signals.change && (signals.change.field === 'flightPreference' || signals.change.field === 'exitTransport.flightPreference')) {
+    const pref = signals.change.value;
+    const patch = isExit
+      ? { legs: [{ index: legIndex, exitTransport: { ...leg.exitTransport, flightsBank: [], flightPreference: pref } }] }
+      : { legs: [{ index: legIndex, flightsBank: [], flightPreference: pref }] };
+    return { modelPatch: patch, continue: true };
+  }
+
+  const confirmedId = signals.confirm?.id || (signals.flightConfirmed ? shown[0]?.id : null);
+  if (!confirmedId) return { modelPatch: null, continue: false };
+
+  const confirmedFlight = bank.find(f => f.id === confirmedId) || shown[0];
+  sendFn({ type: 'marker', content: '[FLIGHT_CONFIRMED]' });
+  sendFn({ type: 'flight_confirmed', data: { flight: confirmedFlight } });
+
+  const patch = isExit
+    ? { legs: [{ index: legIndex, exitTransport: { ...leg.exitTransport, confirmedFlight } }] }
+    : { legs: [{ index: legIndex, confirmedFlight, step: 'hotel' }] };
+
+  console.log(`[select_flight] leg ${legIndex} confirmed: ${confirmedFlight?.airline}`);
+  return { modelPatch: patch, continue: true };
+}
