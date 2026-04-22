@@ -298,14 +298,22 @@ export default function Chat() {
         const session = (data?.chat_sessions || []).find(s => s.id === sessionId)
         if (session) {
           setMessages(session.messages || [WELCOME_MESSAGE])
-          setHiddenMarkers(session.hiddenMarkers || [])
           setMessageCards(session.messageCards || {})
-          setSelectedCards(session.selectedCards || { flights: [], hotels: [], activities: [] })
-          setActivityBank(session.activityBank || null)
-          setFlightsBankFull(session.flightsBankFull || [])
-          setHotelsBankFull(session.hotelsBankFull || [])
           setSessionTitle(session.title || 'New Trip')
-          const itinDone = (session.hiddenMarkers || []).some(m => m.content?.includes('[ITINERARY_SHOWN]'))
+
+          let restoredModel
+          if (session.tripModel) {
+            restoredModel = session.tripModel
+          } else {
+            restoredModel = migrateLegacySession(session.hiddenMarkers || [])
+          }
+          tripModelRef.current = restoredModel
+          setTripModel(restoredModel)
+          saveTripModelToSession(restoredModel, sessionId)
+
+          const itinDone = restoredModel.phase === 'post_itinerary' ||
+            restoredModel.phase === 'itinerary' ||
+            (session.hiddenMarkers || []).some(m => m.content?.includes('[ITINERARY_SHOWN]'))
           setItineraryShown(itinDone)
         }
         setSessionLoaded(true)
@@ -332,22 +340,18 @@ export default function Chat() {
   }, [prefilledDestination, sessionLoaded]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Session save ───────────────────────────────────────────────────────────
-  async function saveSession(msgs, markers, cards, selCards, actBank, flightsBank, hotelsBank) {
+  async function saveSession(msgs, cards, model) {
     if (!user) return
-    const title = deriveTitleFromMarkers(markers)
-    const ctx   = extractCtxFromMarkers(markers)
+    const title = deriveSessionTitle(model)
+    const ctx   = deriveSessionCtx(model)
     const session = {
       id: sessionId,
       title,
       destination:   ctx?.destination || '',
       departureDate: ctx?.departure   || '',
       messages:      msgs,
-      hiddenMarkers: markers,
       messageCards:  cards,
-      selectedCards: selCards,
-      activityBank:  actBank,
-      flightsBankFull: flightsBank,
-      hotelsBankFull:  hotelsBank,
+      tripModel:     model,
       updatedAt: new Date().toISOString(),
     }
     const { data } = await supabase.from('profiles').select('chat_sessions').eq('id', user.id).single()
@@ -369,8 +373,10 @@ export default function Chat() {
     const itinText  = itinIdx >= 0 ? messages[itinIdx]?.content || '' : ''
     const bookCards = itinEntry?.[1] || {}
 
-    const ctx  = extractCtxFromMarkers(hiddenMarkers)
+    const ctx  = deriveSessionCtx(tripModel)
     const dest = ctx?.destination || sessionTitle
+
+    const cards = deriveSelectedCards(tripModel)
 
     const trip = {
       id:            crypto.randomUUID(),
@@ -379,7 +385,7 @@ export default function Chat() {
       departureDate: ctx?.departure || '',
       returnDate:    ctx?.return    || '',
       itineraryText: itinText,
-      bookingCards:  bookCards,
+      bookingCards:  { ...bookCards, ...cards },
       savedAt:       new Date().toISOString(),
     }
 
