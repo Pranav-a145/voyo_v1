@@ -101,6 +101,53 @@ Respond with ONLY a valid JSON array, no markdown, no explanation:
   }
 })
 
+// ── Destination images (Pexels + Wikipedia fallback) ─────────────────────────
+
+app.get('/api/destination-image', async (req, res) => {
+  const { city, size = 'card' } = req.query
+  if (!city) return res.status(400).json({ error: 'city is required' })
+
+  const cityName = city.split(',')[0].trim()
+  const pexelsKey = process.env.PEXELS_API_KEY
+
+  if (pexelsKey && pexelsKey !== 'your_pexels_api_key_here') {
+    try {
+      const queries = [
+        encodeURIComponent(`${cityName} travel landmark`),
+        encodeURIComponent(`${cityName} city`),
+        encodeURIComponent(cityName),
+      ]
+      let photo = null
+      for (const query of queries) {
+        const response = await fetch(
+          `https://api.pexels.com/v1/search?query=${query}&per_page=5`,
+          { headers: { Authorization: pexelsKey } }
+        )
+        const data = await response.json()
+        if (data.photos?.length) { photo = data.photos[0]; break }
+      }
+      if (photo) {
+        const url = size === 'hero' ? photo.src.large2x : photo.src.large
+        return res.json({ url })
+      }
+    } catch {}
+  }
+
+  // Fallback: Wikipedia
+  try {
+    const wikiRes  = await fetch(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(cityName)}`
+    )
+    const wikiData = await wikiRes.json()
+    const url = size === 'hero'
+      ? (wikiData.originalimage?.source || wikiData.thumbnail?.source || null)
+      : (wikiData.thumbnail?.source || null)
+    return res.json({ url: url || null })
+  } catch {
+    return res.json({ url: null })
+  }
+})
+
 // ── Chat (SSE streaming) ──────────────────────────────────────────────────────
 
 app.post('/api/chat', async (req, res) => {
