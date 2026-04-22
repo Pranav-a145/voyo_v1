@@ -534,3 +534,170 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
   console.log(`[select_activity] leg ${legIndex} confirmed ${activityType}:`, selectedActivities.map(a => a.title));
   return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed, shownActivityOffsets: offsets }] }, continue: true };
 }
+
+// ── Exit transport ─────────────────────────────────────────────────────────────
+
+async function executeAskExitTransport({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const leg = model.legs[legIndex];
+  const isLastLeg = legIndex === model.legs.length - 1;
+  const nextCity = isLastLeg ? model.origin : model.legs[legIndex + 1]?.city;
+  const legContext = buildLegContext(model);
+
+  // Non-streaming: need [CHANGE] signal to know transport type before acting
+  const chatText = await streamClaude(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `The traveler has finished planning ${leg.city.split(',')[0]}. Now ask how they want to get to ${isLastLeg ? (model.origin + ' (their home)') : nextCity?.split(',')[0]}. If it is clearly a flight (e.g. any international leg), suggest it. If a train/ferry/bus is a common option, mention it. After the user tells you or you recommend the transport type, emit [CHANGE]{"leg":${legIndex},"field":"exitTransportType","value":"flight"}[/CHANGE] (or train/bus/ferry). For ground transport set fetchNeeded false in your thinking but still emit the [CHANGE] signal.` },
+    ]
+  );
+
+  const signals = extractSignals(chatText);
+  const { cleaned } = extractAndStripBlocks(chatText);
+  if (cleaned) sendFn({ type: 'delta', text: cleaned });
+
+  if (!signals.change || signals.change.field !== 'exitTransportType') {
+    return { modelPatch: null, continue: false };
+  }
+
+  const transportType = signals.change.value || 'flight';
+  const fetchNeeded = transportType === 'flight';
+
+  return {
+    modelPatch: { legs: [{ index: legIndex, exitTransport: { type: transportType, fetchNeeded, flightsBank: [], confirmedFlight: null } }] },
+    continue: fetchNeeded,
+  };
+}
+
+// ── Summary ────────────────────────────────────────────────────────────────────
+
+function buildTripSummaryContext(model) {
+  return {
+    origin: model.origin,
+    groupSize: model.groupSize,
+    budgetPerPerson: model.budgetPerPerson,
+    legs: (model.legs || []).map(l => ({
+      city: l.city,
+      arrivalDate: l.arrivalDate,
+      departureDate: l.departureDate,
+      durationNights: l.durationNights,
+      confirmedFlight: l.confirmedFlight ? { airline: l.confirmedFlight.airline, price: l.confirmedFlight.price } : null,
+      confirmedHotel: l.confirmedHotel ? { name: l.confirmedHotel.name, price: l.confirmedHotel.price } : null,
+      confirmedActivities: (l.confirmedActivities || []).filter(a => !a.skipped).map(a => a.title),
+      exitTransport: l.exitTransport?.confirmedFlight
+        ? { airline: l.exitTransport.confirmedFlight.airline }
+        : { type: l.exitTransport?.type },
+    })),
+  };
+}
+
+async function executeSummary({ model, messages, systemPrompt, sendFn }) {
+  const ctx = buildTripSummaryContext(model);
+
+  await streamClaudeSSE(systemPrompt, [
+    ...messages,
+    { role: 'user', content: `[PRE_ITINERARY_SUMMARY]\nConfirmed trip: ${JSON.stringify(ctx)}\n\nAll legs planned. Give the traveler a clean summary of everything locked in across all legs: each arrival and exit flight (airline, route, time, price), each hotel (name, price/night), all must-sees and hidden gems per city, all confirmed activity venues per city. End with: "Does everything look good to you? If you're happy with the plan, I'll build your full day-by-day itinerary right now — or just let me know if you'd like to swap anything out."` },
+  ], sendFn);
+
+  // Non-streaming second call to detect itinerary approval
+  const chatText = await streamClaude(systemPrompt, [
+    ...messages,
+    { role: 'user', content: `[ITINERARY_STAGE] The traveler has seen the full summary. If they approve — emit [ITINERARY_CONFIRMED]. Only stay if they want to change something specific.` },
+  ]);
+
+  const signals = extractSignals(chatText);
+  const { cleaned } = extractAndStripBlocks(chatText);
+
+  if (!signals.itineraryConfirmed) {
+    if (cleaned) sendFn({ type: 'delta', text: cleaned });
+    sendFn({ type: 'marker', content: '[PRE_ITINERARY_SUMMARY_SHOWN]' });
+    return { modelPatch: null, continue: false };
+  }
+
+  sendFn({ type: 'fetching' });
+  return { modelPatch: { phase: 'itinerary' }, continue: true };
+}
+
+// ── Itinerary ──────────────────────────────────────────────────────────────────
+
+async function executeItinerary({ model, messages, systemPrompt, sendFn }) {
+  const ctx = buildTripSummaryContext(model);
+
+  await streamClaudeSSE(systemPrompt, [
+    ...messages,
+    { role: 'user', content: `[ITINERARY_MODE]\nFull trip context: ${JSON.stringify(ctx)}\n\nBuild the traveler's complete day-by-day itinerary spanning all ${model.legs.length} ${model.legs.length > 1 ? 'legs' : 'leg'} of this trip.\n\nBEFORE WRITING — run these checks:\n1. What actual day of the week is each date? Label every day: date + day name.\n2. Arrival flight departure time → work backwards for hotel departure. International = 3hrs early + real transit time.\n3. Return/departure flight on last day — same calculation.\n4. NIGHTLIFE SCHEDULING — Fri/Sat first, overflow to Sun, then weekdays last resort.\n5. Verify every confirmed flight, hotel, must-see, and activity appears by name.\n\nSTRUCTURE:\n- Open with one warm sentence: you built this around their confirmed picks, invite pushback.\n- Trip header: all destinations, total dates, total nights.\n- For each city leg: city header, then day-by-day with date + day of week + one-word vibe.\n- Include travel days between cities with the confirmed transport.\n- Close with a "Before You Go" section: reservations, pre-bookings, practical tips.\n\nDAILY RULES: Named places only (no "explore the area"). Every meal = specific restaurant + one-line reason. Max 3-4 major things/day. Clubs after 10:30pm. Realistic transit times between venues.` },
+  ], sendFn);
+
+  const allFlights    = (model.legs || []).flatMap(l => [l.confirmedFlight, l.exitTransport?.confirmedFlight].filter(Boolean));
+  const allHotels     = (model.legs || []).map(l => l.confirmedHotel).filter(Boolean);
+  const allActivities = (model.legs || []).flatMap(l => (l.confirmedActivities || []).filter(a => !a.skipped));
+
+  sendFn({ type: 'itinerary_bank', data: { flights: allFlights, hotels: allHotels, activities: allActivities, isItinerary: true } });
+  sendFn({ type: 'marker', content: '[ITINERARY_SHOWN]' });
+
+  return { modelPatch: { phase: 'post_itinerary' }, continue: false };
+}
+
+async function executePostItinerary({ model, messages, systemPrompt, sendFn }) {
+  await streamClaudeSSE(systemPrompt, messages, sendFn);
+  return { modelPatch: null, continue: false };
+}
+
+// ── Action dispatcher ──────────────────────────────────────────────────────────
+
+async function executeAction({ action, model, messages, systemPrompt, sendFn }) {
+  const args = { model, messages, systemPrompt, sendFn };
+
+  switch (action.type) {
+    case 'gathering':          return executeGathering(args);
+    case 'fetch_flights':      return executeFetchFlights({ ...args, legIndex: action.legIndex });
+    case 'select_flight':      return executeSelectFlight({ ...args, legIndex: action.legIndex });
+    case 'fetch_hotels':       return executeFetchHotels({ ...args, legIndex: action.legIndex });
+    case 'select_hotel':       return executeSelectHotel({ ...args, legIndex: action.legIndex });
+    case 'show_must_sees':     return executeShowMustSees({ ...args, legIndex: action.legIndex });
+    case 'confirm_must_sees':  return executeConfirmMustSees({ ...args, legIndex: action.legIndex });
+    case 'fetch_activities':   return executeFetchActivities({ ...args, legIndex: action.legIndex });
+    case 'select_activity':    return executeSelectActivity({ ...args, legIndex: action.legIndex, activityType: action.activityType });
+    case 'ask_exit_transport': return executeAskExitTransport({ ...args, legIndex: action.legIndex });
+    case 'fetch_exit_flight':  return executeFetchFlights({ ...args, legIndex: action.legIndex, isExit: true });
+    case 'select_exit_flight': return executeSelectFlight({ ...args, legIndex: action.legIndex, isExit: true });
+    case 'advance_step':
+      return { modelPatch: { legs: [{ index: action.legIndex, step: action.nextStep }] }, continue: true };
+    case 'next_leg':
+      return { modelPatch: { currentLegIndex: action.nextLegIndex }, continue: true };
+    case 'transition_summary':
+      return { modelPatch: { phase: 'summary' }, continue: true };
+    case 'summary':            return executeSummary(args);
+    case 'itinerary':          return executeItinerary(args);
+    case 'post_itinerary':     return executePostItinerary(args);
+    default:
+      console.warn('[orchestrator] unknown action type:', action.type);
+      return { modelPatch: null, continue: false };
+  }
+}
+
+// ── Main entry point ───────────────────────────────────────────────────────────
+
+export async function executeRequest({ tripModel, messages, profile, sendFn }) {
+  const systemPrompt = buildSystemPrompt(profile);
+  let model = tripModel;
+
+  let continueLoop = true;
+  let iterations = 0;
+  const MAX_ITERATIONS = 10;
+
+  while (continueLoop && iterations < MAX_ITERATIONS) {
+    iterations++;
+    const action = resolveAction(model);
+    console.log(`[orchestrator] iteration ${iterations} | action: ${action.type}`);
+
+    const result = await executeAction({ action, model, messages, systemPrompt, sendFn });
+
+    if (result.modelPatch) {
+      model = applyPatch(model, result.modelPatch);
+      sendFn({ type: 'trip_model_update', data: result.modelPatch });
+    }
+
+    continueLoop = result.continue === true;
+  }
+}
