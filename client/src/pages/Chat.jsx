@@ -265,7 +265,7 @@ export default function Chat() {
   const [messageCards, setMessageCards] = useState({})
 
   // Trip model — replaces activityBank, selectedCards, flightsBankFull, hotelsBankFull, hiddenMarkers
-  const [tripModel, setTripModel] = useState(initialTripModel)
+  const [tripModel, setTripModel] = useState(() => initialTripModel())
   const tripModelRef = useRef(initialTripModel())  // mutable ref for use inside async callbacks
 
   // Session UI state
@@ -293,6 +293,14 @@ export default function Chat() {
   // ── Load existing session ──────────────────────────────────────────────────
   useEffect(() => {
     if (isNew || !user) return
+
+    // Hydrate from sessionStorage immediately for instant restore
+    const cached = loadTripModelFromSession(sessionId)
+    if (cached) {
+      tripModelRef.current = cached
+      setTripModel(cached)
+    }
+
     supabase.from('profiles').select('chat_sessions').eq('id', user.id).single()
       .then(({ data }) => {
         const session = (data?.chat_sessions || []).find(s => s.id === sessionId)
