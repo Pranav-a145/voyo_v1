@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { fetchFlights, fetchHotels, fetchActivities, sortFlightPoolByPreference, sortHotelPoolByStyle, hotelStyleQuery } from './fetchers.js';
-import { streamClaude, streamClaudeSSE, extractAndStripBlocks } from './streaming.js';
+import { streamClaude, streamClaudeSSE, extractAndStripBlocks, anthropic } from './streaming.js';
 import { buildSystemPrompt, buildLegContext } from './prompts.js';
 
 // ── Signal extraction ──────────────────────────────────────────────────────────
@@ -282,4 +282,253 @@ async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legI
 
   console.log(`[select_flight] leg ${legIndex} confirmed: ${confirmedFlight?.airline}`);
   return { modelPatch: patch, continue: true };
+}
+
+// ── Fetch hotels for a leg ─────────────────────────────────────────────────────
+
+async function executeFetchHotels({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const leg = model.legs[legIndex];
+  sendFn({ type: 'fetching' });
+
+  const hotelsRaw = await fetchHotels(
+    leg.city, leg.arrivalDate, leg.departureDate,
+    model.groupSize || 1, leg.hotelStyle
+  ).catch(e => { console.error('[fetch_hotels] error:', e.message); return []; });
+
+  const hotels = hotelsRaw.map((h, i) => ({ ...h, id: `hotel_${legIndex}_${i}` }));
+
+  const selText = await streamClaude(systemPrompt, [
+    ...messages,
+    { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ hotels }, null, 2)}\n[/KNOWLEDGE_BANK]\n\nOutput only [SELECTED_HOTELS]{"ids":["id1","id2","id3"]}[/SELECTED_HOTELS] picking the 3 best. Nothing else.` },
+  ]);
+
+  let hotelCards = hotels.slice(0, 3);
+  const selM = selText.match(/\[SELECTED_HOTELS\]([\s\S]*?)\[\/SELECTED_HOTELS\]/);
+  if (selM) {
+    try {
+      const { ids } = JSON.parse(selM[1].trim());
+      const idMap = Object.fromEntries(hotels.map(h => [h.id, h]));
+      const ordered = ids.map(id => idMap[id]).filter(Boolean);
+      if (ordered.length > 0) hotelCards = ordered;
+    } catch {}
+  }
+
+  const legContext = buildLegContext(model);
+  await streamClaudeSSE(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'assistant', content: `Let me pull up the best hotels in ${leg.city.split(',')[0]} for you!` },
+      { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ hotels: hotelCards }, null, 2)}\n[/KNOWLEDGE_BANK]\n\n[HOTELS_SHOWN]\n\nPresent ONLY these 3 hotels using exact names and prices. Ask which they prefer.` },
+    ],
+    sendFn
+  );
+
+  sendFn({ type: 'hotels_bank', data: { hotels: hotelCards, hotelsBankFull: hotels } });
+  return { modelPatch: { legs: [{ index: legIndex, hotelsBank: hotels, shownHotels: hotelCards }] }, continue: false };
+}
+
+// ── Select hotel (user is choosing) ───────────────────────────────────────────
+
+async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const leg = model.legs[legIndex];
+  const bank = leg.hotelsBank || [];
+  const shown = leg.shownHotels || bank.slice(0, 3);
+  const hotelOptions = shown.map(h => `${h.id}: ${h.name}`).join(' | ');
+
+  const legContext = buildLegContext(model);
+  // Non-streaming: need full text to extract [CONFIRM]/[CHANGE] signals before acting
+  const chatText = await streamClaude(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","id":"<exact_id>"}[/CONFIRM], emit [HOTEL_CONFIRMED].\n- If they want DIFFERENT options — emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference>"}[/CHANGE].\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
+    ]
+  );
+
+  const signals = extractSignals(chatText);
+  const { cleaned: chatCleaned } = extractAndStripBlocks(chatText);
+  if (chatCleaned) sendFn({ type: 'delta', text: chatCleaned });
+
+  if (signals.change?.field === 'hotelPreference') {
+    return { modelPatch: { legs: [{ index: legIndex, hotelsBank: [], hotelPreference: signals.change.value }] }, continue: true };
+  }
+  if (signals.change?.field === 'groupSize') {
+    const newSize = parseInt(signals.change.value, 10);
+    sendFn({ type: 'marker', content: `[GROUP_SIZE_UPDATE]{"passengers":${newSize}}` });
+    return { modelPatch: { groupSize: newSize, legs: [{ index: legIndex, hotelsBank: [] }] }, continue: true };
+  }
+
+  const confirmedId = signals.confirm?.id || (signals.hotelConfirmed ? shown[0]?.id : null);
+  if (!confirmedId) return { modelPatch: null, continue: false };
+
+  const confirmedHotel = bank.find(h => h.id === confirmedId) || shown[0];
+  sendFn({ type: 'marker', content: '[HOTEL_CONFIRMED]' });
+  sendFn({ type: 'hotel_confirmed', data: { hotel: confirmedHotel } });
+
+  // Ask about activity preferences before advancing to must_sees
+  const updatedModel = { ...model, legs: model.legs.map((l, i) => i === legIndex ? { ...l, confirmedHotel } : l) };
+  const askText = await streamClaude(
+    systemPrompt + (buildLegContext(updatedModel) || ''),
+    [
+      ...messages,
+      { role: 'assistant', content: chatCleaned || '' },
+      { role: 'user', content: `[HOTEL_CONFIRMED]\n\nHotel is locked in for ${leg.city.split(',')[0]}. Ask the traveler ONE short conversational question about what they want to do there. Reference their profile interests. OUTPUT ONLY THE QUESTION — stop after asking.` },
+    ]
+  );
+  const { cleaned: askCleaned } = extractAndStripBlocks(askText);
+  if (askCleaned) sendFn({ type: 'delta', text: askCleaned });
+
+  console.log(`[select_hotel] leg ${legIndex} confirmed: ${confirmedHotel?.name}`);
+  return { modelPatch: { legs: [{ index: legIndex, confirmedHotel, step: 'must_sees' }] }, continue: false };
+}
+
+// ── Must-sees ──────────────────────────────────────────────────────────────────
+
+async function executeShowMustSees({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const leg = model.legs[legIndex];
+  const legContext = buildLegContext(model);
+
+  // Kick off activity fetch in parallel while streaming must-sees
+  const fetchPromise = (leg.activityPreferences?.length
+    ? fetchActivities(leg.city, leg.activityPreferences)
+    : Promise.resolve(null)
+  ).catch(() => null);
+
+  await streamClaudeSSE(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `[MUST_SEES_STAGE] destination="${leg.city}"\n\nThe traveler just told you their activity preferences for this leg. Acknowledge what they said, then present The Icons list (4-6 famous landmarks) and Hidden Gems list (3-5 underrated spots) as instructed. Ask which they want to hit on this part of the trip.` },
+    ],
+    sendFn
+  );
+
+  const bank = await fetchPromise;
+  if (bank) {
+    sendFn({ type: 'activity_bank_ready', data: bank });
+  }
+
+  return {
+    modelPatch: { legs: [{ index: legIndex, mustSeesShown: true, activitiesBank: bank }] },
+    continue: false,
+  };
+}
+
+async function executeConfirmMustSees({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const legContext = buildLegContext(model);
+  // Non-streaming: need full text to check [MUST_SEES_CONFIRMED] signal
+  const chatText = await streamClaude(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `[MUST_SEES_STAGE] The traveler has been shown The Icons and Hidden Gems lists. Read their latest message. If they picked any attractions or gave any substantive reply — acknowledge their picks and emit [MUST_SEES_CONFIRMED]. Only stay if they are genuinely asking follow-up questions.` },
+    ]
+  );
+
+  const signals = extractSignals(chatText);
+  const { cleaned } = extractAndStripBlocks(chatText);
+  if (cleaned) sendFn({ type: 'delta', text: cleaned });
+
+  if (!signals.mustSeesConfirmed) return { modelPatch: null, continue: false };
+
+  sendFn({ type: 'marker', content: '[MUST_SEES_CONFIRMED]' });
+  return { modelPatch: { legs: [{ index: legIndex, mustSeesConfirmed: true, step: 'activities' }] }, continue: true };
+}
+
+// ── Activities ─────────────────────────────────────────────────────────────────
+
+async function executeFetchActivities({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const leg = model.legs[legIndex];
+  sendFn({ type: 'fetching' });
+
+  let activityTypes = leg.activityPreferences || [];
+  try {
+    const extractMsg = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 120,
+      messages: [
+        ...messages.slice(-4),
+        { role: 'user', content: `Based on what the traveler said they want to do in ${leg.city.split(',')[0]}, output ONLY valid JSON: {"types":["term1","term2",...]}. Include every distinct activity category as a short search term. No other text.` },
+      ],
+    });
+    const raw = extractMsg.content[0].text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const { types } = JSON.parse(raw);
+    if (Array.isArray(types) && types.length > 0) activityTypes = types;
+  } catch (e) { console.warn('[fetch_activities] type extraction failed:', e.message); }
+
+  const bank = await fetchActivities(leg.city, activityTypes);
+  sendFn({ type: 'activity_bank_ready', data: bank });
+
+  return { modelPatch: { legs: [{ index: legIndex, activitiesBank: bank }] }, continue: true };
+}
+
+async function executeSelectActivity({ model, messages, systemPrompt, sendFn, legIndex, activityType }) {
+  const leg = model.legs[legIndex];
+  const bank = leg.activitiesBank;
+  const offset = leg.shownActivityOffsets?.[activityType] ?? 0;
+  const pool = bank.byType[activityType] || [];
+  const currentShown = pool.slice(offset, offset + 2);
+  const activityOptions = currentShown.map(a => `${a.id}: ${a.title}`).join(' | ');
+
+  const legContext = buildLegContext(model);
+  // Non-streaming: need full text to extract [ACTIVITY_OK]/[ACTIVITY_MORE]/[ACTIVITY_SKIP] signals
+  const chatText = await streamClaude(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `[ACTIVITY_STAGE] The traveler was shown these 2 "${activityType}" options: ${activityOptions}. Read their message.\n\n- If they picked one or more — emit [ACTIVITY_OK] AND output [ACTIVITY_SELECTED]{"ids":["id_X"]}[/ACTIVITY_SELECTED].\n- If they want MORE different options for the same category — emit [ACTIVITY_MORE].\n- If they want to SKIP — emit [ACTIVITY_SKIP].\n- Err on the side of [ACTIVITY_OK] for any positive reply.\n- Do NOT name venues for the next category yet.` },
+    ]
+  );
+
+  const signals = extractSignals(chatText);
+  const { cleaned } = extractAndStripBlocks(chatText);
+  if (cleaned) sendFn({ type: 'delta', text: cleaned });
+
+  if (!signals.activityOk && !signals.activityMore && !signals.activitySkip) {
+    return { modelPatch: null, continue: false };
+  }
+
+  if (signals.activitySkip) {
+    const updatedConfirmed = [...(leg.confirmedActivities || []), { activityType, skipped: true }];
+    return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed }] }, continue: true };
+  }
+
+  if (signals.activityMore) {
+    const newOffset = offset + 2;
+    const newShown = pool.slice(newOffset, newOffset + 2);
+    if (newShown.length === 0) {
+      const updatedConfirmed = [...(leg.confirmedActivities || []), { activityType, skipped: true }];
+      return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed }] }, continue: true };
+    }
+
+    sendFn({ type: 'activities_bank', data: { activities: newShown, activityType } });
+
+    const presentText = await streamClaude(systemPrompt, [
+      ...messages,
+      { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ activityType, activities: newShown }, null, 2)}\n[/KNOWLEDGE_BANK]\n\nPresent these 2 "${activityType}" alternatives with personality. Ask if they work.` },
+    ]);
+    const { cleaned: pCleaned } = extractAndStripBlocks(presentText);
+    if (pCleaned) sendFn({ type: 'delta', text: pCleaned });
+
+    const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: newOffset };
+    return { modelPatch: { legs: [{ index: legIndex, shownActivityOffsets: offsets }] }, continue: false };
+  }
+
+  // ACTIVITY_OK — confirm selected activities
+  let selectedActivities = currentShown;
+  if (signals.activitySelected?.ids) {
+    const idMap = Object.fromEntries(pool.map(a => [a.id, a]));
+    const picked = signals.activitySelected.ids.map(id => idMap[id]).filter(Boolean);
+    if (picked.length > 0) selectedActivities = picked;
+  }
+
+  sendFn({ type: 'activities_bank', data: { activities: selectedActivities, activityType } });
+  sendFn({ type: 'activity_confirmed', data: { activities: selectedActivities } });
+
+  const updatedConfirmed = [...(leg.confirmedActivities || []), ...selectedActivities];
+  const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: offset };
+
+  console.log(`[select_activity] leg ${legIndex} confirmed ${activityType}:`, selectedActivities.map(a => a.title));
+  return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed, shownActivityOffsets: offsets }] }, continue: true };
 }
