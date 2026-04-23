@@ -4,6 +4,7 @@ export function initialTripModel() {
     origin: null,
     groupSize: null,
     budgetPerPerson: null,
+    budgetIsPerPerson: true,
     currentLegIndex: 0,
     phase: 'gathering',
     legs: [],

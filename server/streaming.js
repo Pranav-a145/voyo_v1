@@ -4,25 +4,48 @@ import Anthropic from '@anthropic-ai/sdk';
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 export { anthropic };
 
-// Tags to suppress from the live stream entirely
+async function withRetry(fn, maxAttempts = 4) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isOverloaded = err?.status === 529 || err?.error?.type === 'overloaded_error';
+      if (!isOverloaded || attempt === maxAttempts) throw err;
+      const delay = 1000 * 2 ** (attempt - 1); // 1s, 2s, 4s
+      console.warn(`[retry] overloaded, attempt ${attempt}/${maxAttempts}, waiting ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+// Tags to suppress from the live stream entirely.
+// Inline signals (no closing tag) use '' as the end-marker so the scan loop
+// drops only the token itself and immediately resumes — boundary-safe.
 const SUPPRESS = {
-  '[STATE]':       '[/STATE]',
-  '[TOOL_CALL]':   '[/TOOL_CALL]',
-  '[TRIP_UPDATE]': '[/TRIP_UPDATE]',
-  '[FETCH]':       '[/FETCH]',
-  '[ADVANCE]':     '[/ADVANCE]',
-  '[CONFIRM]':     '[/CONFIRM]',
-  '[CHANGE]':      '[/CHANGE]',
+  '[STATE]':               '[/STATE]',
+  '[TOOL_CALL]':           '[/TOOL_CALL]',
+  '[TRIP_UPDATE]':         '[/TRIP_UPDATE]',
+  '[FETCH]':               '[/FETCH]',
+  '[ADVANCE]':             '[/ADVANCE]',
+  '[CONFIRM]':             '[/CONFIRM]',
+  '[CHANGE]':              '[/CHANGE]',
+  '[FLIGHT_CONFIRMED]':    '',
+  '[HOTEL_CONFIRMED]':     '',
+  '[MUST_SEES_CONFIRMED]': '',
+  '[ITINERARY_CONFIRMED]': '',
+  '[ACTIVITY_OK]':         '',
+  '[ACTIVITY_MORE]':       '',
+  '[ACTIVITY_SKIP]':       '',
 };
 
-// Single-word signals to strip inline (no closing tag)
+// STRIP_INLINE is now only used in extractAndStripBlocks (non-streaming path)
 const STRIP_INLINE = [
   '[FLIGHT_CONFIRMED]', '[HOTEL_CONFIRMED]', '[MUST_SEES_CONFIRMED]',
   '[ITINERARY_CONFIRMED]', '[ACTIVITY_OK]', '[ACTIVITY_MORE]', '[ACTIVITY_SKIP]',
 ];
 
 const START_TAGS = Object.keys(SUPPRESS);
-const MAX_TAG_LEN = Math.max(...[...START_TAGS, ...STRIP_INLINE].map(t => t.length));
+const MAX_TAG_LEN = Math.max(...START_TAGS.map(t => t.length));
 
 export function extractAndStripBlocks(text) {
   const toolCallRegex = /\[TOOL_CALL\][\s\S]*?\[\/TOOL_CALL\]|\[TOOL_CALL\][\s\S]*$/g;
@@ -59,28 +82,33 @@ export function extractAndStripBlocks(text) {
 }
 
 export async function streamClaude(systemPrompt, messages) {
-  const stream = anthropic.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 8096,
-    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-    messages,
-  });
+  return withRetry(async () => {
+    const stream = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8096,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages,
+    });
 
-  let fullText = '';
-  for await (const event of stream) {
-    if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
-      fullText += event.delta.text;
+    let fullText = '';
+    for await (const event of stream) {
+      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        fullText += event.delta.text;
+      }
     }
-  }
-  return fullText;
+    return fullText;
+  });
 }
 
 export async function streamClaudeSSE(systemPrompt, messages, sendFn) {
-  const stream = anthropic.messages.stream({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 8096,
-    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
-    messages,
+  const stream = await withRetry(() => {
+    const s = anthropic.messages.stream({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 8096,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+      messages,
+    });
+    return Promise.resolve(s);
   });
 
   let fullText = '';
@@ -94,14 +122,19 @@ export async function streamClaudeSSE(systemPrompt, messages, sendFn) {
 
     let output = '';
     scan: while (buffer.length > 0) {
-      if (suppressing) {
-        const endIdx = buffer.indexOf(suppressing);
-        if (endIdx !== -1) {
-          buffer = buffer.slice(endIdx + suppressing.length);
+      if (suppressing !== null) {
+        if (suppressing === '') {
+          // Inline signal (no closing tag) — already consumed, just resume
           suppressing = null;
         } else {
-          buffer = buffer.slice(Math.max(0, buffer.length - (suppressing.length - 1)));
-          break scan;
+          const endIdx = buffer.indexOf(suppressing);
+          if (endIdx !== -1) {
+            buffer = buffer.slice(endIdx + suppressing.length);
+            suppressing = null;
+          } else {
+            buffer = buffer.slice(Math.max(0, buffer.length - (suppressing.length - 1)));
+            break scan;
+          }
         }
       } else {
         let earliestIdx = -1;

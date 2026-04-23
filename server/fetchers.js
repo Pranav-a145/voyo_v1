@@ -3,17 +3,31 @@ import Anthropic from '@anthropic-ai/sdk';
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+async function withRetry(fn, maxAttempts = 4) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isOverloaded = err?.status === 529 || err?.error?.type === 'overloaded_error';
+      if (!isOverloaded || attempt === maxAttempts) throw err;
+      const delay = 1000 * 2 ** (attempt - 1);
+      console.warn(`[retry] overloaded, attempt ${attempt}/${maxAttempts}, waiting ${delay}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
 // ─── Private helper ───────────────────────────────────────────────────────────
 
 async function resolveIataCodes(origin, destination) {
-  const msg = await anthropic.messages.create({
+  const msg = await withRetry(() => anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 64,
     messages: [{
       role: 'user',
       content: `Convert this origin city to its best IATA airport code for international/long-haul travel, and this destination city to its best IATA airport code. If a city has multiple airports, pick the main one most travelers use (e.g. New York = JFK for international, London = LHR, Paris = CDG, Chicago = ORD). Return ONLY a JSON object like: {"origin_code": "JFK", "destination_code": "ATH"}. No other text. Origin: ${origin}. Destination: ${destination}.`,
     }],
-  });
+  }));
   const raw = msg.content[0].text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   console.log('\n─── resolveIataCodes RESPONSE ──────────────────────────');
   console.log(raw);
@@ -79,6 +93,7 @@ export async function fetchFlights(origin, destination, departureDate, returnDat
       layover_airport: layoverAirport,
       departure_token: f.departure_token,
       search_url: searchUrl,
+      isRoundTrip: true,
     };
   });
 }
@@ -114,14 +129,17 @@ export function sortFlightPoolByPreference(pool, preference) {
 export function sortHotelPoolByStyle(pool, style) {
   if (!style) return pool;
   const s = style.toLowerCase();
+  const parsePrice = (p) => {
+    if (p == null) return 0;
+    if (typeof p === 'number') return p;
+    return parseFloat(String(p).replace(/[^0-9.]/g, '')) || 0;
+  };
   const byPrice = [...pool].filter(h => h.price != null);
   const noPricePool = pool.filter(h => h.price == null);
   if (/luxury|high.?end|5.?star|upscale|fancy|premium/.test(s)) {
-    // Most expensive first
-    byPrice.sort((a, b) => b.price - a.price);
+    byPrice.sort((a, b) => parsePrice(b.price) - parsePrice(a.price));
   } else if (/cheap|budget|affordable/.test(s)) {
-    // Cheapest first
-    byPrice.sort((a, b) => a.price - b.price);
+    byPrice.sort((a, b) => parsePrice(a.price) - parsePrice(b.price));
   }
   return [...byPrice, ...noPricePool];
 }
@@ -137,10 +155,6 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
     adults: String(guests),
     api_key: process.env.SERPAPI_KEY,
   });
-  if (style && /luxury|high.?end|5.?star|upscale|fancy|premium/.test(style.toLowerCase())) {
-    params.set('sort_by', '8'); // Google Hotels sort_by=8 = highest rated / luxury
-  }
-
   const url = `https://serpapi.com/search?${params}`;
   console.log('\n─── fetchHotels REQUEST ────────────────────────────────');
   console.log('URL:', url);
@@ -160,18 +174,44 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
   const mapped = (data.properties || [])
     .filter((h) => h.link)
     .slice(0, 15)
-    .map((h) => ({
-      name: h.name,
-      price: h.rate_per_night?.lowest ?? null,
-      rating: h.overall_rating ?? null,
-      link: h.link,
-      thumbnail: h.thumbnail ?? h.images?.[0]?.thumbnail ?? h.images?.[0]?.original_image ?? null,
-    }));
+    .map((h) => {
+      const thumbnail =
+        h.images?.[0]?.original_image ??
+        h.images?.[0]?.thumbnail ??
+        h.thumbnail ??
+        h.serpapi_thumbnail ??
+        null;
+      console.log(`[hotel thumbnail] ${h.name}: ${thumbnail ? thumbnail.slice(0, 80) : 'NULL'}`);
+      return {
+        name: h.name,
+        price: h.rate_per_night?.lowest ?? null,
+        rating: h.overall_rating ?? null,
+        link: h.link,
+        address: h.address ?? null,
+        thumbnail,
+      };
+    });
   return sortHotelPoolByStyle(mapped, style);
 }
 
 export async function fetchActivities(destination, activityTypes) {
   const types = (activityTypes || []).length > 0 ? activityTypes : ['things to do'];
+
+  const parseReviews = (v) => {
+    if (v == null) return 0;
+    if (typeof v === 'number') return v;
+    return parseInt(String(v).replace(/[^0-9]/g, ''), 10) || 0;
+  };
+
+  const popularityScore = (a) =>
+    a.rating * Math.log(parseReviews(a.reviews) + 1);
+
+  const sortByPopularity = (items) => {
+    const withRating = items.filter(a => a.rating != null);
+    const noRating   = items.filter(a => a.rating == null);
+    withRating.sort((a, b) => popularityScore(b) - popularityScore(a));
+    return [...withRating, ...noRating];
+  };
 
   const fetchOne = async (type) => {
     const params = new URLSearchParams({
@@ -183,7 +223,7 @@ export async function fetchActivities(destination, activityTypes) {
     try {
       const res = await fetch(`https://serpapi.com/search?${params}`);
       const data = await res.json();
-      const results = (data.local_results || []).slice(0, 8);
+      const results = (data.local_results || []).slice(0, 20);
       if (results[0]) {
         console.log(`[fetchActivities] raw first result for "${type}":`, JSON.stringify(results[0], null, 2));
       }
@@ -196,7 +236,7 @@ export async function fetchActivities(destination, activityTypes) {
   let idCounter = 0;
   const byType = {};
   for (let i = 0; i < types.length; i++) {
-    byType[types[i]] = allResults[i].map(r => {
+    const mapped = allResults[i].map(r => {
       const lat = r.gps_coordinates?.latitude;
       const lng = r.gps_coordinates?.longitude;
       const mapsUrl = r.place_id
@@ -216,6 +256,7 @@ export async function fetchActivities(destination, activityTypes) {
         thumbnail: r.serpapi_thumbnail ?? r.thumbnail ?? r.photos?.[0]?.thumbnail ?? null,
       };
     });
+    byType[types[i]] = sortByPopularity(mapped);
   }
 
   console.log('[fetchActivities]', types.map(t => `${t}:${byType[t].length}`).join(', '));

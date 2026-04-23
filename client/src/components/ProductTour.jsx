@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 
 const STEPS = [
   {
@@ -74,6 +74,30 @@ function getTooltipStyle(rect, placement) {
 export default function ProductTour({ onDone }) {
   const [step, setStep] = useState(0)
   const [rect, setRect] = useState(null)
+  const audioRef = useRef(null)
+
+  useEffect(() => {
+    const audio = new Audio('/Daft Punk - Around the World (Official Audio).mp3')
+    audio.currentTime = 65
+    audio.volume = 0.5
+    audio.play().catch(() => {})
+    audioRef.current = audio
+    return () => { audio.pause(); audio.src = '' }
+  }, [])
+
+  function fadeOutAndDone() {
+    const audio = audioRef.current
+    if (!audio) { onDone(); return }
+    const tick = setInterval(() => {
+      if (audio.volume <= 0.05) {
+        clearInterval(tick)
+        audio.pause()
+        onDone()
+      } else {
+        audio.volume = Math.max(0, audio.volume - 0.05)
+      }
+    }, 80)
+  }
 
   const current = STEPS[step]
 
@@ -97,7 +121,7 @@ export default function ProductTour({ onDone }) {
 
   function next() {
     if (step < STEPS.length - 1) setStep(s => s + 1)
-    else onDone()
+    else fadeOutAndDone()
   }
 
   return (
@@ -155,7 +179,7 @@ export default function ProductTour({ onDone }) {
 
           <div className="flex items-center justify-between px-5 py-3 border-t border-gray-50">
             <button
-              onClick={onDone}
+              onClick={fadeOutAndDone}
               className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
             >
               Skip tour

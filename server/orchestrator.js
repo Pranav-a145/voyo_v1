@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { fetchFlights, fetchHotels, fetchActivities, sortFlightPoolByPreference } from './fetchers.js';
+import { fetchFlights, fetchHotels, fetchActivities, sortFlightPoolByPreference, sortHotelPoolByStyle } from './fetchers.js';
 import { streamClaude, streamClaudeSSE, extractAndStripBlocks, anthropic } from './streaming.js';
 import { buildSystemPrompt, buildLegContext } from './prompts.js';
 
@@ -67,7 +67,7 @@ export function resolveAction(model) {
 
   if (phase === 'gathering')      return { type: 'gathering' };
   if (phase === 'summary')        return { type: 'summary' };
-  if (phase === 'itinerary')      return { type: 'itinerary' };
+  if (phase === 'itinerary')      return model.itineraryBuilt ? { type: 'post_itinerary' } : { type: 'itinerary' };
   if (phase === 'post_itinerary') return { type: 'post_itinerary' };
 
   if (phase !== 'planning') {
@@ -85,8 +85,9 @@ export function resolveAction(model) {
       return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'hotel' };
 
     case 'hotel':
-      if (!leg.hotelsBank?.length)   return { type: 'fetch_hotels',   legIndex: currentLegIndex };
-      if (!leg.confirmedHotel)       return { type: 'select_hotel',   legIndex: currentLegIndex };
+      if (!leg.hotelStyleAsked)      return { type: 'ask_hotel_style', legIndex: currentLegIndex };
+      if (!leg.hotelsBank?.length)   return { type: 'fetch_hotels',    legIndex: currentLegIndex };
+      if (!leg.confirmedHotel)       return { type: 'select_hotel',    legIndex: currentLegIndex };
       return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'must_sees' };
 
     case 'must_sees':
@@ -101,14 +102,26 @@ export function resolveAction(model) {
       return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'exit_transport' };
     }
 
-    case 'exit_transport':
-      if (!leg.exitTransport?.type)
-        return { type: 'ask_exit_transport',  legIndex: currentLegIndex };
+    case 'exit_transport': {
+      const isLastLeg = currentLegIndex === legs.length - 1;
+      // Single-destination trip: arrival flight was round trip — no separate return needed
+      if (legs.length === 1) {
+        return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
+      }
+      if (!leg.exitTransport?.type) {
+        if (isLastLeg) {
+          return leg.exitTransport?.flightsBank?.length
+            ? { type: 'select_exit_flight', legIndex: currentLegIndex }
+            : { type: 'fetch_exit_flight',  legIndex: currentLegIndex };
+        }
+        return { type: 'ask_exit_transport', legIndex: currentLegIndex };
+      }
       if (leg.exitTransport.type === 'flight' && !leg.exitTransport.flightsBank?.length)
         return { type: 'fetch_exit_flight',   legIndex: currentLegIndex };
       if (leg.exitTransport.type === 'flight' && !leg.exitTransport.confirmedFlight)
         return { type: 'select_exit_flight',  legIndex: currentLegIndex };
       return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
+    }
 
     case 'complete':
       if (currentLegIndex + 1 < legs.length) return { type: 'next_leg', nextLegIndex: currentLegIndex + 1 };
@@ -129,7 +142,7 @@ async function executeGathering({ model, messages, systemPrompt, sendFn }) {
     return { modelPatch: null, continue: false };
   }
 
-  const { tripType, origin, groupSize, budgetPerPerson, legs } = signals.tripUpdate;
+  const { tripType, origin, groupSize, budgetPerPerson, budgetIsPerPerson, legs } = signals.tripUpdate;
 
   // If Claude emitted [TRIP_UPDATE] without a real origin, ignore it and keep gathering
   const resolvedOrigin = (origin && !/^unknown$/i.test(origin.trim())) ? origin : (model.origin || null);
@@ -165,6 +178,7 @@ async function executeGathering({ model, messages, systemPrompt, sendFn }) {
     origin: resolvedOrigin,
     groupSize: groupSize || model.groupSize,
     budgetPerPerson: budgetPerPerson || model.budgetPerPerson,
+    budgetIsPerPerson: budgetIsPerPerson !== undefined ? budgetIsPerPerson : (model.budgetIsPerPerson ?? true),
     phase: 'planning',
     currentLegIndex: 0,
     legs: initialLegs,
@@ -228,6 +242,13 @@ async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legI
     ...f, human_readable_departure: formatTime(f.departure_time), human_readable_arrival: formatTime(f.arrival_time),
   }));
 
+  const modelPatch = isExit
+    ? { legs: [{ index: legIndex, exitTransport: { type: 'flight', ...(leg.exitTransport || {}), flightsBank: flights, shownFlights: flightCards } }] }
+    : { legs: [{ index: legIndex, flightsBank: flights, shownFlights: flightCards }] };
+
+  // Send cards FIRST so the client creates a fresh message slot, then stream text into it
+  sendFn({ type: 'knowledge_bank', data: { flights: flightCards, hotels: [], activities: [], flightsBankFull: flights } });
+
   const legContext = buildLegContext(model);
   await streamClaudeSSE(
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
@@ -239,11 +260,6 @@ async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legI
     sendFn
   );
 
-  const modelPatch = isExit
-    ? { legs: [{ index: legIndex, exitTransport: { ...leg.exitTransport, flightsBank: flights, shownFlights: flightCards } }] }
-    : { legs: [{ index: legIndex, flightsBank: flights, shownFlights: flightCards }] };
-
-  sendFn({ type: 'knowledge_bank', data: { flights: flightCards, hotels: [], activities: [], flightsBankFull: flights } });
   return { modelPatch, continue: false };
 }
 
@@ -261,7 +277,7 @@ async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legI
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[FLIGHT_STAGE] The traveler has been shown these flight options: ${flightOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge it warmly, emit [CONFIRM]{"leg":${legIndex},"type":"${isExit ? 'exit_flight' : 'flight'}","id":"<exact_id>"}[/CONFIRM], emit [FLIGHT_CONFIRMED].\n- If they want DIFFERENT or MORE flights — emit [CHANGE]{"leg":${legIndex},"field":"${isExit ? 'exitTransport.flightPreference' : 'flightPreference'}","value":"<their preference>"}[/CHANGE] and acknowledge.\n- If genuinely undecided, help them decide.` },
+      { role: 'user', content: `[FLIGHT_STAGE] The traveler has been shown these flight options: ${flightOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge it warmly, emit [CONFIRM]{"leg":${legIndex},"type":"${isExit ? 'exit_flight' : 'flight'}","id":"<exact_id>"}[/CONFIRM], emit [FLIGHT_CONFIRMED].\n- If they want MORE or DIFFERENT flights — emit [CHANGE]{"leg":${legIndex},"field":"${isExit ? 'exitTransport.flightPreference' : 'flightPreference'}","value":"<preference or 'more options'>"}[/CHANGE]. Use their stated preference (cheaper, direct, etc.) if given; otherwise use "more options". You may ask ONE clarifying question ONLY if this is clearly their first request and they gave zero indication of what they want. If they've already been asked or show any impatience, emit [CHANGE] immediately. CRITICAL: Never invent flight options yourself — always emit [CHANGE] so the system fetches real data.\n- If genuinely undecided, help them decide.` },
     ]
   );
 
@@ -292,15 +308,49 @@ async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legI
   return { modelPatch: patch, continue: true };
 }
 
+// ── Ask hotel style before fetching ───────────────────────────────────────────
+
+async function executeAskHotelStyle({ model, messages, systemPrompt, sendFn, legIndex }) {
+  const leg = model.legs[legIndex];
+  const legContext = buildLegContext(model);
+  await streamClaudeSSE(
+    systemPrompt + (legContext ? '\n\n' + legContext : ''),
+    [
+      ...messages,
+      { role: 'user', content: `[HOTEL_STYLE_STAGE] destination="${leg.city}"\n\nThe flight is already confirmed — do NOT acknowledge or repeat the flight selection again. Jump straight to asking ONE brief casual question about the hotel vibe they're after for ${leg.city.split(',')[0]} — e.g. boutique, luxury, budget-friendly, something with a pool, central location, etc. Keep it warm and conversational.` },
+    ],
+    sendFn
+  );
+  return { modelPatch: { legs: [{ index: legIndex, hotelStyleAsked: true }] }, continue: false };
+}
+
 // ── Fetch hotels for a leg ─────────────────────────────────────────────────────
 
 async function executeFetchHotels({ model, messages, systemPrompt, sendFn, legIndex }) {
   const leg = model.legs[legIndex];
   sendFn({ type: 'fetching' });
 
+  // Extract hotel style from conversation if not already set
+  let hotelStyle = leg.hotelStyle;
+  if (!hotelStyle) {
+    try {
+      const extractMsg = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 60,
+        messages: [
+          ...messages.slice(-4),
+          { role: 'user', content: `Based on what the traveler said about their hotel preference for ${leg.city.split(',')[0]}, output ONLY valid JSON: {"style": "value or null"}. Use one of: luxury, boutique, budget, resort, apartment. If not clearly specified, use null. No other text.` },
+        ],
+      });
+      const raw = extractMsg.content[0].text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      const { style } = JSON.parse(raw);
+      if (style && style !== 'null') hotelStyle = style;
+    } catch (e) { console.warn('[fetch_hotels] style extraction failed:', e.message); }
+  }
+
   const hotelsRaw = await fetchHotels(
     leg.city, leg.arrivalDate, leg.departureDate,
-    model.groupSize || 1, leg.hotelStyle
+    model.groupSize || 1, hotelStyle
   ).catch(e => { console.error('[fetch_hotels] error:', e.message); return []; });
 
   const hotels = hotelsRaw.map((h, i) => ({ ...h, id: `hotel_${legIndex}_${i}` }));
@@ -321,6 +371,9 @@ async function executeFetchHotels({ model, messages, systemPrompt, sendFn, legIn
     } catch {}
   }
 
+  // Send cards FIRST so the client creates a fresh message slot, then stream text into it
+  sendFn({ type: 'hotels_bank', data: { hotels: hotelCards, hotelsBankFull: hotels, checkIn: leg.arrivalDate, checkOut: leg.departureDate } });
+
   const legContext = buildLegContext(model);
   await streamClaudeSSE(
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
@@ -332,8 +385,8 @@ async function executeFetchHotels({ model, messages, systemPrompt, sendFn, legIn
     sendFn
   );
 
-  sendFn({ type: 'hotels_bank', data: { hotels: hotelCards, hotelsBankFull: hotels } });
-  return { modelPatch: { legs: [{ index: legIndex, hotelsBank: hotels, shownHotels: hotelCards }] }, continue: false };
+  const allShownHotelIds = hotelCards.map(h => h.id);
+  return { modelPatch: { legs: [{ index: legIndex, hotelsBank: hotels, shownHotels: hotelCards, hotelStyle: hotelStyle || null, allShownHotelIds }] }, continue: false };
 }
 
 // ── Select hotel (user is choosing) ───────────────────────────────────────────
@@ -350,7 +403,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","id":"<exact_id>"}[/CONFIRM], emit [HOTEL_CONFIRMED].\n- If they want DIFFERENT options — emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference>"}[/CHANGE].\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
+      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","id":"<exact_id>"}[/CONFIRM], emit [HOTEL_CONFIRMED].\n- If they want MORE or DIFFERENT hotels — emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE]. If they stated a preference (e.g. "something with a pool", "more central", "more upscale"), use it as the value. If they just want to see more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request for more and they gave zero indication of what they want — but if you do ask, do NOT emit [CHANGE] in that same response. End your response with the question and wait. If they've already been asked once or are expressing any preference at all, emit [CHANGE] immediately without asking anything. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from the live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
     ]
   );
 
@@ -359,7 +412,57 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
   if (chatCleaned) sendFn({ type: 'delta', text: chatCleaned });
 
   if (signals.change?.field === 'hotelPreference') {
-    return { modelPatch: { legs: [{ index: legIndex, hotelsBank: [], hotelPreference: signals.change.value }] }, continue: true };
+    const pref = signals.change.value;
+    const prefIsUpscale = /luxury|high.?end|5.?star|upscale|fancy|premium/i.test(pref || '');
+    const bankIsUpscale = /luxury|high.?end|5.?star|upscale|fancy|premium/i.test(leg.hotelStyle || '');
+
+    // If user wants upscale but bank was fetched for something cheaper, skip the bank and refetch
+    if (prefIsUpscale && !bankIsUpscale) {
+      return { modelPatch: { legs: [{ index: legIndex, hotelsBank: [], hotelStyle: pref, allShownHotelIds: [] }] }, continue: true };
+    }
+
+    // Accumulate all IDs shown so far (current batch + previous batches)
+    const allShownIds = new Set([
+      ...(leg.allShownHotelIds || []),
+      ...(leg.shownHotels || []).map(h => h.id),
+    ]);
+    const unshown = bank.filter(h => !allShownIds.has(h.id));
+
+    if (unshown.length > 0) {
+      // Show next batch from existing bank — no re-fetch needed
+      const sortedUnshown = sortHotelPoolByStyle(unshown, pref);
+      const selText = await streamClaude(systemPrompt, [
+        ...messages,
+        { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ hotels: sortedUnshown }, null, 2)}\n[/KNOWLEDGE_BANK]\n\nThe traveler wants "${pref}" options. Output only [SELECTED_HOTELS]{"ids":["id1","id2","id3"]}[/SELECTED_HOTELS] picking the 3 best matches for "${pref}" from these. Nothing else.` },
+      ]);
+      let nextShown = sortedUnshown.slice(0, 3);
+      const selM2 = selText.match(/\[SELECTED_HOTELS\]([\s\S]*?)\[\/SELECTED_HOTELS\]/);
+      if (selM2) {
+        try {
+          const { ids } = JSON.parse(selM2[1].trim());
+          const idMap = Object.fromEntries(sortedUnshown.map(h => [h.id, h]));
+          const ordered = ids.map(id => idMap[id]).filter(Boolean);
+          if (ordered.length > 0) nextShown = ordered;
+        } catch {}
+      }
+
+      // Cards first, then presentation text
+      sendFn({ type: 'hotels_bank', data: { hotels: nextShown, checkIn: leg.arrivalDate, checkOut: leg.departureDate } });
+      const legContext2 = buildLegContext(model);
+      const presentText = await streamClaude(systemPrompt + (legContext2 ? '\n\n' + legContext2 : ''), [
+        ...messages,
+        { role: 'assistant', content: chatCleaned || '' },
+        { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ hotels: nextShown }, null, 2)}\n[/KNOWLEDGE_BANK]\n\n[HOTELS_SHOWN]\n\nPresent these ${nextShown.length} alternative hotels with personality. Ask which they prefer.` },
+      ]);
+      const { cleaned: pCleaned } = extractAndStripBlocks(presentText);
+      if (pCleaned) sendFn({ type: 'delta', text: pCleaned });
+
+      const newAllShownIds = [...allShownIds, ...nextShown.map(h => h.id)];
+      return { modelPatch: { legs: [{ index: legIndex, shownHotels: nextShown, allShownHotelIds: newAllShownIds }] }, continue: false };
+    }
+
+    // Bank exhausted — refetch with the stated preference
+    return { modelPatch: { legs: [{ index: legIndex, hotelsBank: [], hotelStyle: pref, allShownHotelIds: [] }] }, continue: true };
   }
   if (signals.change?.field === 'groupSize') {
     const newSize = parseInt(signals.change.value, 10);
@@ -368,10 +471,20 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     return { modelPatch: { groupSize: newSize, legs: [{ index: legIndex, hotelsBank: [] }] }, continue: true };
   }
 
-  const confirmedId = signals.confirm?.id || (signals.hotelConfirmed ? shown[0]?.id : null);
-  if (!confirmedId) return { modelPatch: null, continue: false };
+  if (!signals.confirm?.id && !signals.hotelConfirmed) return { modelPatch: null, continue: false };
 
-  const confirmedHotel = bank.find(h => h.id === confirmedId) || shown[0];
+  // Primary: exact ID from [CONFIRM] tag
+  let confirmedHotel = signals.confirm?.id ? bank.find(h => h.id === signals.confirm.id) : null;
+
+  // Secondary: match by hotel name in the user's last message
+  if (!confirmedHotel) {
+    const userText = (messages[messages.length - 1]?.content || '').toLowerCase();
+    confirmedHotel = shown.find(h => h.name && userText.includes(h.name.toLowerCase().split(/\s+/).slice(0, 2).join(' ')));
+  }
+
+  // Fallback: first shown hotel
+  if (!confirmedHotel) confirmedHotel = shown[0];
+  if (!confirmedHotel) return { modelPatch: null, continue: false };
   sendFn({ type: 'marker', content: '[HOTEL_CONFIRMED]' });
   sendFn({ type: 'hotel_confirmed', data: { hotel: confirmedHotel } });
 
@@ -398,9 +511,25 @@ async function executeShowMustSees({ model, messages, systemPrompt, sendFn, legI
   const leg = model.legs[legIndex];
   const legContext = buildLegContext(model);
 
+  // Extract activity types in user's stated order BEFORE the parallel fetch
+  let orderedTypes = leg.activityPreferences || [];
+  try {
+    const extractMsg = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 120,
+      messages: [
+        ...messages.slice(-6),
+        { role: 'user', content: `Based on what the traveler said they want to do in ${leg.city.split(',')[0]}, output ONLY valid JSON: {"types":["term1","term2",...]}. List categories IN THE ORDER the traveler mentioned them — their first mention is their highest priority. Include every distinct activity type as a short search term. No other text.` },
+      ],
+    });
+    const raw = extractMsg.content[0].text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const { types } = JSON.parse(raw);
+    if (Array.isArray(types) && types.length > 0) orderedTypes = types;
+  } catch (e) { console.warn('[show_must_sees] type extraction failed:', e.message); }
+
   // Kick off activity fetch in parallel while streaming must-sees
-  const fetchPromise = (leg.activityPreferences?.length
-    ? fetchActivities(leg.city, leg.activityPreferences)
+  const fetchPromise = (orderedTypes.length
+    ? fetchActivities(leg.city, orderedTypes)
     : Promise.resolve(null)
   ).catch(() => null);
 
@@ -408,7 +537,7 @@ async function executeShowMustSees({ model, messages, systemPrompt, sendFn, legI
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[MUST_SEES_STAGE] destination="${leg.city}"\n\nThe traveler just told you their activity preferences for this leg. Acknowledge what they said, then present The Icons list (4-6 famous landmarks) and Hidden Gems list (3-5 underrated spots) as instructed. Ask which they want to hit on this part of the trip.` },
+      { role: 'user', content: `[MUST_SEES_STAGE] destination="${leg.city}"\n\nThe traveler just told you their activity preferences for this leg. Acknowledge what they said, then present The Icons list (4-6 famous landmarks) and Hidden Gems list (3-5 underrated spots) as instructed. Ask which they want to hit on this part of the trip. IMPORTANT: Do NOT say what activity category is coming next — do not say "I'll pull up nightlife" or "food options are next" or name any specific category. Just end by asking which must-sees they want to include.` },
     ],
     sendFn
   );
@@ -447,6 +576,28 @@ async function executeConfirmMustSees({ model, messages, systemPrompt, sendFn, l
 
 // ── Activities ─────────────────────────────────────────────────────────────────
 
+const ACTIVITY_CANDIDATE_SIZE = 6;
+
+async function preSelectActivities(candidates, activityType, cityName) {
+  if (candidates.length <= 2) return candidates.slice(0, 2);
+  try {
+    const selMsg = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 64,
+      messages: [{
+        role: 'user',
+        content: `Pick the 2 best "${activityType}" options for a traveler visiting ${cityName}. Prefer locally authentic, traveler-relevant venues. Avoid: corporate/business event spaces, activities culturally irrelevant to the destination (e.g. an Indian restaurant when the query is for local food in Thailand), generic tourist traps with low engagement.\n\nOptions: ${candidates.map(a => `${a.id}: ${a.title} (${a.rating ?? 'N/A'}★, ${a.reviews ?? 0} reviews)`).join(' | ')}\n\nOutput ONLY valid JSON: {"ids":["id1","id2"]}`,
+      }],
+    });
+    const raw = selMsg.content[0].text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const { ids } = JSON.parse(raw);
+    const idMap = Object.fromEntries(candidates.map(a => [a.id, a]));
+    const picked = ids.map(id => idMap[id]).filter(Boolean);
+    if (picked.length > 0) return picked.slice(0, 2);
+  } catch (e) { console.warn('[preSelectActivities] failed:', e.message); }
+  return candidates.slice(0, 2);
+}
+
 async function executeFetchActivities({ model, messages, systemPrompt, sendFn, legIndex }) {
   const leg = model.legs[legIndex];
   sendFn({ type: 'fetching' });
@@ -458,7 +609,7 @@ async function executeFetchActivities({ model, messages, systemPrompt, sendFn, l
       max_tokens: 120,
       messages: [
         ...messages.slice(-4),
-        { role: 'user', content: `Based on what the traveler said they want to do in ${leg.city.split(',')[0]}, output ONLY valid JSON: {"types":["term1","term2",...]}. Include every distinct activity category as a short search term. No other text.` },
+        { role: 'user', content: `Based on what the traveler said they want to do in ${leg.city.split(',')[0]}, output ONLY valid JSON: {"types":["term1","term2",...]}. List categories IN THE ORDER the traveler mentioned them — their first mention is their highest priority. Include every distinct activity category as a short search term. No other text.` },
       ],
     });
     const raw = extractMsg.content[0].text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -477,41 +628,81 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
   const bank = leg.activitiesBank;
   const offset = leg.shownActivityOffsets?.[activityType] ?? 0;
   const pool = bank.byType[activityType] || [];
-  const currentShown = pool.slice(offset, offset + 2);
+  const legContext = buildLegContext(model);
+
+  const cityName = leg.city.split(',')[0];
+
+  // ── Initial presentation: type has never been shown to the user yet ──────────
+  const hasBeenShown = activityType in (leg.shownActivityOffsets || {});
+  if (!hasBeenShown) {
+    const candidates = pool.slice(0, ACTIVITY_CANDIDATE_SIZE);
+    if (candidates.length === 0) {
+      sendFn({ type: 'delta', text: `I couldn't find any ${activityType} options for ${cityName} — moving on.` });
+      const updatedConfirmed = [...(leg.confirmedActivities || []), { activityType, skipped: true }];
+      return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed }] }, continue: true };
+    }
+
+    const initialShown = await preSelectActivities(candidates, activityType, cityName);
+
+    sendFn({ type: 'activities_bank', data: { activities: initialShown, activityType } });
+
+    await streamClaudeSSE(
+      systemPrompt + (legContext ? '\n\n' + legContext : ''),
+      [
+        ...messages,
+        { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ activityType, activities: initialShown }, null, 2)}\n[/KNOWLEDGE_BANK]\n\nPresent these 2 "${activityType}" options for ${cityName} with personality. Ask the traveler which they'd like to include, or if they'd prefer different options. Do NOT mention what category comes next.` },
+      ],
+      sendFn
+    );
+
+    const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: ACTIVITY_CANDIDATE_SIZE };
+    const shownIds = { ...(leg.shownActivityIds || {}), [activityType]: initialShown.map(a => a.id) };
+    console.log(`[select_activity] leg ${legIndex} initial present: ${activityType}`);
+    return { modelPatch: { legs: [{ index: legIndex, shownActivityOffsets: offsets, shownActivityIds: shownIds }] }, continue: false };
+  }
+
+  // ── Selection logic: user is responding to cards they've already seen ────────
+  const shownIds = leg.shownActivityIds?.[activityType];
+  const currentShown = shownIds
+    ? shownIds.map(id => pool.find(a => a.id === id)).filter(Boolean)
+    : pool.slice(0, 2);
   const activityOptions = currentShown.map(a => `${a.id}: ${a.title}`).join(' | ');
 
-  const legContext = buildLegContext(model);
   // Non-streaming: need full text to extract [ACTIVITY_OK]/[ACTIVITY_MORE]/[ACTIVITY_SKIP] signals
   const chatText = await streamClaude(
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[ACTIVITY_STAGE] The traveler was shown these 2 "${activityType}" options: ${activityOptions}. Read their message.\n\n- If they picked one or more — emit [ACTIVITY_OK] AND output [ACTIVITY_SELECTED]{"ids":["id_X"]}[/ACTIVITY_SELECTED].\n- If they want MORE different options for the same category — emit [ACTIVITY_MORE].\n- If they want to SKIP — emit [ACTIVITY_SKIP].\n- Err on the side of [ACTIVITY_OK] for any positive reply.\n- Do NOT name venues for the next category yet.` },
+      { role: 'user', content: `[ACTIVITY_STAGE] The traveler was shown these 2 "${activityType}" options: ${activityOptions}. Read their message.\n\n- If they picked one or more — emit [ACTIVITY_OK] AND output [ACTIVITY_SELECTED]{"ids":["id_X"]}[/ACTIVITY_SELECTED].\n- If they want MORE different options — emit [ACTIVITY_MORE]. You may ask ONE clarifying question ONLY if this is clearly their first request for more and they gave zero indication of what they want. If they've already been asked or show any impatience, emit [ACTIVITY_MORE] immediately. CRITICAL: Never name venues yourself — always emit [ACTIVITY_MORE] so the system pulls real options.\n- If they want to SKIP — emit [ACTIVITY_SKIP].\n- Err on the side of [ACTIVITY_OK] for any positive reply.\n- CRITICAL: Do NOT mention, name, or preview what comes next (no "now let me pull up X", no "next we'll look at Y"). Just confirm the current selection warmly and stop. The system handles what comes next.` },
     ]
   );
 
   const signals = extractSignals(chatText);
   const { cleaned } = extractAndStripBlocks(chatText);
-  if (cleaned) sendFn({ type: 'delta', text: cleaned });
 
   if (!signals.activityOk && !signals.activityMore && !signals.activitySkip) {
+    if (cleaned) sendFn({ type: 'delta', text: cleaned });
     return { modelPatch: null, continue: false };
   }
 
   if (signals.activitySkip) {
+    if (cleaned) sendFn({ type: 'delta', text: cleaned });
     const updatedConfirmed = [...(leg.confirmedActivities || []), { activityType, skipped: true }];
     return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed }] }, continue: true };
   }
 
   if (signals.activityMore) {
-    const newOffset = offset + 2;
-    const newShown = pool.slice(newOffset, newOffset + 2);
-    if (newShown.length === 0) {
-      sendFn({ type: 'delta', text: `That's all the ${activityType} options I have for ${leg.city.split(',')[0]} — moving on to the next category.` });
+    if (cleaned) sendFn({ type: 'delta', text: cleaned });
+    const moreCandidates = pool.slice(offset, offset + ACTIVITY_CANDIDATE_SIZE);
+    if (moreCandidates.length === 0) {
+      sendFn({ type: 'delta', text: `That's all the ${activityType} options I have for ${cityName} — moving on to the next category.` });
       const updatedConfirmed = [...(leg.confirmedActivities || []), { activityType, skipped: true }];
       return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed }] }, continue: true };
     }
 
+    const newShown = await preSelectActivities(moreCandidates, activityType, cityName);
+
+    // Cards first so client creates new slot, then text streams into it
     sendFn({ type: 'activities_bank', data: { activities: newShown, activityType } });
 
     const presentText = await streamClaude(systemPrompt, [
@@ -521,11 +712,12 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
     const { cleaned: pCleaned } = extractAndStripBlocks(presentText);
     if (pCleaned) sendFn({ type: 'delta', text: pCleaned });
 
-    const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: newOffset };
-    return { modelPatch: { legs: [{ index: legIndex, shownActivityOffsets: offsets }] }, continue: false };
+    const newOffsets = { ...(leg.shownActivityOffsets || {}), [activityType]: offset + ACTIVITY_CANDIDATE_SIZE };
+    const newShownIds = { ...(leg.shownActivityIds || {}), [activityType]: newShown.map(a => a.id) };
+    return { modelPatch: { legs: [{ index: legIndex, shownActivityOffsets: newOffsets, shownActivityIds: newShownIds }] }, continue: false };
   }
 
-  // ACTIVITY_OK — confirm selected activities
+  // ACTIVITY_OK — silently lock in and move on; confirmed card shows in final itinerary
   let selectedActivities = currentShown;
   if (signals.activitySelected?.ids) {
     const idMap = Object.fromEntries(pool.map(a => [a.id, a]));
@@ -533,14 +725,11 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
     if (picked.length > 0) selectedActivities = picked;
   }
 
-  sendFn({ type: 'activities_bank', data: { activities: selectedActivities, activityType } });
-  sendFn({ type: 'activity_confirmed', data: { activities: selectedActivities } });
-
   const updatedConfirmed = [...(leg.confirmedActivities || []), ...selectedActivities];
   const offsets = { ...(leg.shownActivityOffsets || {}), [activityType]: offset + currentShown.length };
 
   console.log(`[select_activity] leg ${legIndex} confirmed ${activityType}:`, selectedActivities.map(a => a.title));
-  return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed, shownActivityOffsets: offsets }] }, continue: true };
+  return { modelPatch: { legs: [{ index: legIndex, confirmedActivities: updatedConfirmed, shownActivityOffsets: offsets }] }, continue: true, didStream: false };
 }
 
 // ── Exit transport ─────────────────────────────────────────────────────────────
@@ -579,22 +768,92 @@ async function executeAskExitTransport({ model, messages, systemPrompt, sendFn, 
 
 // ── Summary ────────────────────────────────────────────────────────────────────
 
+function computeBudgetBreakdown(ctx) {
+  const { groupSize, budgetPerPerson, budgetIsPerPerson, arrivalFlightIsRoundTrip } = ctx;
+  const parseMoney = (v) => {
+    if (v == null) return 0;
+    if (typeof v === 'number') return v;
+    return parseFloat(String(v).replace(/[^0-9.]/g, '')) || 0;
+  };
+
+  const totalBudget = budgetIsPerPerson
+    ? parseMoney(budgetPerPerson) * groupSize
+    : parseMoney(budgetPerPerson);
+
+  const lines = [];
+  let totalNights = 0;
+  let totalActivities = 0;
+  const ppl = groupSize > 1 ? ` × ${groupSize} people` : '';
+
+  for (const leg of ctx.legs) {
+    if (leg.confirmedFlight) {
+      const ppx = parseMoney(leg.confirmedFlight.price_per_person);
+      const route = leg.confirmedFlight.origin && leg.confirmedFlight.destination
+        ? ` (${leg.confirmedFlight.origin} → ${leg.confirmedFlight.destination})`
+        : '';
+      lines.push({
+        label: `${leg.confirmedFlight.airline || 'Flight'}${route}${arrivalFlightIsRoundTrip ? ' — round trip' : ''}`,
+        amount: ppx * groupSize,
+      });
+    }
+
+    if (leg.confirmedHotel) {
+      const ppn = parseMoney(leg.confirmedHotel.price_per_night);
+      const nights = leg.confirmedHotel.nights || 0;
+      lines.push({
+        label: `${leg.confirmedHotel.name} ($${ppn}/night × ${nights} nights${ppl})`,
+        amount: ppn * nights * groupSize,
+      });
+      totalNights += nights;
+    }
+
+    if (leg.exitTransport) {
+      const ppx = parseMoney(leg.exitTransport.price_per_person);
+      lines.push({ label: `${leg.exitTransport.airline || 'Return flight'}`, amount: ppx * groupSize });
+    }
+
+    totalActivities += (leg.confirmedActivities || []).length;
+  }
+
+  const totalDays = Math.max(totalNights + 1, 1);
+  if (totalActivities > 0) {
+    lines.push({ label: `Activities (${totalActivities} × ~$40/person${ppl})`, amount: totalActivities * 40 * groupSize, isEstimate: true });
+  }
+  lines.push({ label: `Food ($50/day/person${ppl} × ${totalDays} days)`, amount: 50 * totalDays * groupSize, isEstimate: true });
+  lines.push({ label: `Local transport ($20/day/person${ppl} × ${totalDays} days)`, amount: 20 * totalDays * groupSize, isEstimate: true });
+
+  const total = lines.reduce((sum, l) => sum + (l.amount || 0), 0);
+  return { lines, total, budget: totalBudget, leftOver: totalBudget - total, groupSize };
+}
+
 function buildTripSummaryContext(model) {
+  const isSingleDestination = (model.legs || []).length === 1;
   return {
     origin: model.origin,
-    groupSize: model.groupSize,
+    groupSize: model.groupSize || 1,
     budgetPerPerson: model.budgetPerPerson,
+    budgetIsPerPerson: model.budgetIsPerPerson ?? true,
+    arrivalFlightIsRoundTrip: isSingleDestination,
     legs: (model.legs || []).map(l => ({
       city: l.city,
       arrivalDate: l.arrivalDate,
       departureDate: l.departureDate,
       durationNights: l.durationNights,
-      confirmedFlight: l.confirmedFlight ? { airline: l.confirmedFlight.airline, price: l.confirmedFlight.price } : null,
-      confirmedHotel: l.confirmedHotel ? { name: l.confirmedHotel.name, price: l.confirmedHotel.price } : null,
+      confirmedFlight: l.confirmedFlight ? {
+        airline: l.confirmedFlight.airline,
+        price_per_person: l.confirmedFlight.price,
+        origin: l.confirmedFlight.origin_airport,
+        destination: l.confirmedFlight.destination_airport,
+      } : null,
+      confirmedHotel: l.confirmedHotel ? {
+        name: l.confirmedHotel.name,
+        price_per_night: l.confirmedHotel.price,
+        nights: l.durationNights,
+      } : null,
       confirmedActivities: (l.confirmedActivities || []).filter(a => !a.skipped).map(a => a.title).filter(Boolean),
       exitTransport: l.exitTransport?.confirmedFlight
-        ? { airline: l.exitTransport.confirmedFlight.airline }
-        : { type: l.exitTransport?.type },
+        ? { type: 'flight', airline: l.exitTransport.confirmedFlight.airline, price_per_person: l.exitTransport.confirmedFlight.price }
+        : null,
     })),
   };
 }
@@ -604,9 +863,13 @@ async function executeSummary({ model, messages, systemPrompt, sendFn }) {
 
   if (!model.summaryShown) {
     // First turn: stream the summary, wait for user response
+    const budgetNote = ctx.budgetIsPerPerson
+      ? `Budget is PER PERSON ($${ctx.budgetPerPerson}/person). Show all costs per person and compare to the per-person budget.`
+      : `Budget is FOR THE GROUP ($${ctx.budgetPerPerson} total for ${ctx.groupSize} people). Show group totals and compare to group budget.`;
+
     await streamClaudeSSE(systemPrompt, [
       ...messages,
-      { role: 'user', content: `[PRE_ITINERARY_SUMMARY]\nConfirmed trip: ${JSON.stringify(ctx)}\n\nAll legs planned. Give the traveler a clean summary of everything locked in across all legs: each arrival and exit flight (airline, route, time, price), each hotel (name, price/night), all must-sees and hidden gems per city, all confirmed activity venues per city. End with: "Does everything look good to you? If you're happy with the plan, I'll build your full day-by-day itinerary right now — or just let me know if you'd like to swap anything out."` },
+      { role: 'user', content: `[PRE_ITINERARY_SUMMARY]\nConfirmed trip: ${JSON.stringify(ctx)}\n\nAll legs planned. Give the traveler a clean summary — list everything locked in ONCE:\n- Each arrival flight (airline, route, price${ctx.arrivalFlightIsRoundTrip ? ' — round trip, covers return' : ''})\n- Each hotel (name, price/night, nights)\n${ctx.legs.some(l => l.exitTransport) ? '- Each exit/return flight (airline, price)\n' : ''}- All confirmed activities per city\n\nThen include a BUDGET BREAKDOWN section:\n${budgetNote}\nGroup size: ${ctx.groupSize} ${ctx.groupSize > 1 ? 'people' : 'person'}.\n\nFormat it as a markdown table with EXACTLY this structure (use pipe syntax):\n\n| Item | Cost |\n|:-----|-----:|\n| [each line item] | [$amount] |\n| | |\n| **Total Estimated Spend** | **$X** |\n| Your Budget | $Y |\n| **Left Over** | **~$Z** |\n\nCalculate each row:\n• Arrival flights: price_per_person × groupSize for each leg${ctx.arrivalFlightIsRoundTrip ? ' (round trip — DO NOT add a separate return flight row)' : ''}\n${ctx.legs.some(l => l.exitTransport) ? '• Return/exit flights: price_per_person × groupSize for each leg\n' : ''}• Hotels: price_per_night × nights × groupSize for each leg\n• Activities: estimate $25–60 per activity per person × groupSize\n• Food: estimate $50/person/day × total trip days × groupSize\n• Local transport: estimate $20/person/day × total trip days × groupSize\n\nUse a blank row (| | |) to visually separate line items from the totals. Bold the Total and Left Over rows.\n\nEnd with: "Does everything look good to you? If you're happy with the plan, I'll build your full day-by-day itinerary right now — or just let me know if you'd like to swap anything out."` },
     ], sendFn);
 
     sendFn({ type: 'marker', content: '[PRE_ITINERARY_SUMMARY_SHOWN]' });
@@ -640,19 +903,27 @@ async function executeSummary({ model, messages, systemPrompt, sendFn }) {
 async function executeItinerary({ model, messages, systemPrompt, sendFn }) {
   const ctx = buildTripSummaryContext(model);
 
-  await streamClaudeSSE(systemPrompt, [
-    ...messages,
-    { role: 'user', content: `[ITINERARY_MODE]\nFull trip context: ${JSON.stringify(ctx)}\n\nBuild the traveler's complete day-by-day itinerary spanning all ${model.legs.length} ${model.legs.length > 1 ? 'legs' : 'leg'} of this trip.\n\nBEFORE WRITING — run these checks:\n1. What actual day of the week is each date? Label every day: date + day name.\n2. Arrival flight departure time → work backwards for hotel departure. International = 3hrs early + real transit time.\n3. Return/departure flight on last day — same calculation.\n4. NIGHTLIFE SCHEDULING — Fri/Sat first, overflow to Sun, then weekdays last resort.\n5. Verify every confirmed flight, hotel, must-see, and activity appears by name.\n\nSTRUCTURE:\n- Open with one warm sentence: you built this around their confirmed picks, invite pushback.\n- Trip header: all destinations, total dates, total nights.\n- For each city leg: city header, then day-by-day with date + day of week + one-word vibe.\n- Include travel days between cities with the confirmed transport.\n- Close with a "Before You Go" section: reservations, pre-bookings, practical tips.\n\nDAILY RULES: Named places only (no "explore the area"). Every meal = specific restaurant + one-line reason. Max 3-4 major things/day. Clubs after 10:30pm. Realistic transit times between venues.` },
-  ], sendFn);
-
   const allFlights    = (model.legs || []).flatMap(l => [l.confirmedFlight, l.exitTransport?.confirmedFlight].filter(Boolean));
   const allHotels     = (model.legs || []).map(l => l.confirmedHotel).filter(Boolean);
   const allActivities = (model.legs || []).flatMap(l => (l.confirmedActivities || []).filter(a => !a.skipped));
 
-  sendFn({ type: 'itinerary_bank', data: { flights: allFlights, hotels: allHotels, activities: allActivities, isItinerary: true } });
+  // Cards first so client creates a new message slot, then the itinerary text streams into it
+  const budget = computeBudgetBreakdown(ctx);
+  sendFn({ type: 'itinerary_bank', data: { flights: allFlights, hotels: allHotels, activities: allActivities, isItinerary: true, budget } });
+  sendFn({ type: 'delta', text: 'Give me 3–5 minutes while I combine everything into your final itinerary — I\'m laying out every day in detail so bear with me.\n\n' });
+
+  const returnFlightNote = ctx.arrivalFlightIsRoundTrip
+    ? '\n\nIMPORTANT: The arrival flight is a ROUND TRIP — DO NOT mention a return flight anywhere in the itinerary. There is no separate return flight. On the last day, simply note the departure time from the hotel (3hrs before flight) without saying "return flight".'
+    : '';
+
+  await streamClaudeSSE(systemPrompt, [
+    ...messages,
+    { role: 'user', content: `[ITINERARY_MODE]\nFull trip context: ${JSON.stringify(ctx)}\n\nBuild the traveler's complete day-by-day itinerary spanning all ${model.legs.length} ${model.legs.length > 1 ? 'legs' : 'leg'} of this trip.\n\nCRITICAL: Do NOT re-list confirmed flights, hotels, activities, or the budget breakdown — the traveler just saw all of that in the pre-itinerary summary. Jump straight into the day-by-day plan.${returnFlightNote}\n\nBEFORE WRITING — run these checks:\n1. What actual day of the week is each date? Label every day: date + day name.\n2. Arrival flight departure time → work backwards for hotel check-in. International = 3hrs early + real transit time.\n3. ${ctx.arrivalFlightIsRoundTrip ? 'Last day: note hotel checkout + airport transit time only. DO NOT write about a return flight.' : 'Return/departure flight on last day — same calculation.'}\n4. NIGHTLIFE SCHEDULING — Fri/Sat first, overflow to Sun, then weekdays last resort.\n5. Verify every confirmed must-see and activity appears by name on the correct day.\n\nSTRUCTURE:\n- Open with one warm sentence: you built this around their confirmed picks, invite pushback.\n- For each city leg: city header with dates, then day-by-day with date + day of week + one-word vibe.\n- Include travel days between cities with the confirmed transport.\n- Close with a short "Before You Go" section: reservations, pre-bookings, practical tips.\n\nDAILY RULES: Named places only (no "explore the area"). Every meal = specific restaurant + one-line reason. Max 3-4 major things/day. Clubs after 10:30pm. Realistic transit times between venues.` },
+  ], sendFn);
+
   sendFn({ type: 'marker', content: '[ITINERARY_SHOWN]' });
 
-  return { modelPatch: { phase: 'post_itinerary' }, continue: false };
+  return { modelPatch: { phase: 'post_itinerary', itineraryBuilt: true }, continue: false };
 }
 
 async function executePostItinerary({ model, messages, systemPrompt, sendFn }) {
@@ -669,6 +940,7 @@ async function executeAction({ action, model, messages, systemPrompt, sendFn }) 
     case 'gathering':          return executeGathering(args);
     case 'fetch_flights':      return executeFetchFlights({ ...args, legIndex: action.legIndex });
     case 'select_flight':      return executeSelectFlight({ ...args, legIndex: action.legIndex });
+    case 'ask_hotel_style':    return executeAskHotelStyle({ ...args, legIndex: action.legIndex });
     case 'fetch_hotels':       return executeFetchHotels({ ...args, legIndex: action.legIndex });
     case 'select_hotel':       return executeSelectHotel({ ...args, legIndex: action.legIndex });
     case 'show_must_sees':     return executeShowMustSees({ ...args, legIndex: action.legIndex });
@@ -695,18 +967,30 @@ async function executeAction({ action, model, messages, systemPrompt, sendFn }) 
 
 // ── Main entry point ───────────────────────────────────────────────────────────
 
+const STREAMING_ACTIONS = new Set([
+  'gathering', 'select_flight', 'ask_hotel_style', 'select_hotel',
+  'show_must_sees', 'confirm_must_sees', 'select_activity',
+  'ask_exit_transport', 'select_exit_flight', 'summary', 'post_itinerary',
+]);
+
 export async function executeRequest({ tripModel, messages, profile, sendFn }) {
   const systemPrompt = buildSystemPrompt(profile);
   let model = tripModel;
 
   let continueLoop = true;
   let iterations = 0;
+  let prevDidStream = false;
   const MAX_ITERATIONS = 30; // 3-city trip has ~20 advance/transition iterations alone
 
   while (continueLoop && iterations < MAX_ITERATIONS) {
     iterations++;
     const action = resolveAction(model);
     console.log(`[orchestrator] iteration ${iterations} | action: ${action.type}`);
+
+    const willStream = STREAMING_ACTIONS.has(action.type);
+    if (prevDidStream && willStream) {
+      sendFn({ type: 'new_message' });
+    }
 
     // Errors propagate to the route handler in index.js which catches and sends { type: 'error' }
     const result = await executeAction({ action, model, messages, systemPrompt, sendFn });
@@ -716,6 +1000,7 @@ export async function executeRequest({ tripModel, messages, profile, sendFn }) {
       sendFn({ type: 'trip_model_update', data: result.modelPatch });
     }
 
+    prevDidStream = willStream && result.didStream !== false;
     continueLoop = result.continue === true;
   }
 }

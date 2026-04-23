@@ -77,6 +77,7 @@ function FetchingSkeleton() {
               style={{ width: `${w}%`, animationDelay: `${i * 0.2}s` }} />
           ))}
         </div>
+        <p className="text-xs font-semibold text-red-500 mt-2.5">Please don't exit, close, or refresh this page</p>
       </div>
     </div>
   )
@@ -100,6 +101,34 @@ const mdComponents = {
   blockquote: ({ children }) => (
     <blockquote className="border-l-2 border-blue-200 pl-3 my-2 text-sm text-gray-500 italic">{children}</blockquote>
   ),
+  table: ({ children }) => (
+    <div className="my-3 rounded-xl overflow-hidden border border-gray-200 shadow-sm">
+      <table className="w-full text-sm border-collapse">{children}</table>
+    </div>
+  ),
+  thead: ({ children }) => <thead className="bg-gradient-to-r from-blue-50 to-indigo-50">{children}</thead>,
+  tbody: ({ children }) => <tbody className="divide-y divide-gray-100">{children}</tbody>,
+  tr: ({ children }) => <tr className="transition-colors hover:bg-gray-50/60">{children}</tr>,
+  th: ({ children }) => (
+    <th className="px-4 py-2.5 text-left text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{children}</th>
+  ),
+  td: ({ children }) => (
+    <td className="px-4 py-2.5 text-gray-700 last:text-right last:font-medium last:tabular-nums">{children}</td>
+  ),
+}
+
+function ThreeDots() {
+  return (
+    <div className="flex items-center gap-1.5 py-0.5">
+      {[0, 1, 2].map(i => (
+        <span
+          key={i}
+          className="w-2 h-2 bg-gray-300 rounded-full animate-bounce"
+          style={{ animationDelay: `${i * 0.15}s`, animationDuration: '0.9s' }}
+        />
+      ))}
+    </div>
+  )
 }
 
 function MessageBubble({ role, content }) {
@@ -109,6 +138,16 @@ function MessageBubble({ role, content }) {
       <div className="flex justify-end px-4">
         <div className="max-w-[75%] bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-2xl rounded-br-sm px-4 py-3 shadow-sm">
           <p className="text-sm leading-relaxed whitespace-pre-wrap">{content}</p>
+        </div>
+      </div>
+    )
+  }
+  if (!content) {
+    return (
+      <div className="flex items-end gap-3 px-4">
+        <WaypointAvatar />
+        <div className="bg-white rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm">
+          <ThreeDots />
         </div>
       </div>
     )
@@ -156,12 +195,12 @@ function HowItWorksCard({ onDismiss }) {
     {
       icon: (
         <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5.121 17.804A13.937 13.937 0 0112 16c2.5 0 4.847.655 6.879 1.804M15 10a3 3 0 11-6 0 3 3 0 016 0zm6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       ),
       step: '01',
       title: 'Tell Maya your plans',
-      desc: "Share your destination, dates, and what you're after — not sure yet? Maya will help you figure it out",
+      desc: "Share your destination, dates, and vibe — or just a rough idea, she'll help you figure it out. Your profile shapes everything from the start",
     },
     {
       icon: (
@@ -170,8 +209,8 @@ function HowItWorksCard({ onDismiss }) {
         </svg>
       ),
       step: '02',
-      title: 'Get live results',
-      desc: 'Maya searches real flights, hotels, and activities and lets you choose your picks',
+      title: 'Get curated live picks',
+      desc: 'Maya searches real flights, hotels, and activities — then shows only the best fits for you. No endless scrolling, just the right options',
     },
     {
       icon: (
@@ -180,8 +219,9 @@ function HowItWorksCard({ onDismiss }) {
         </svg>
       ),
       step: '03',
-      title: 'Save & book',
-      desc: 'Confirm your picks and receive a full day-by-day itinerary ready to book from',
+      title: 'Your itinerary, your way',
+      desc: "Pick what you want, skip what you don't — Maya builds a personalized day-by-day plan with booking links, ready to go",
+      disclaimer: 'Please allow 2–3 minutes for the final itinerary to generate and do not exit the page during this time.',
     },
   ]
 
@@ -210,7 +250,7 @@ function HowItWorksCard({ onDismiss }) {
 
         {/* Steps */}
         <div className="relative grid grid-cols-3 divide-x divide-white/15 px-1 py-5">
-          {steps.map(({ icon, step, title, desc }) => (
+          {steps.map(({ icon, step, title, desc, disclaimer }) => (
             <div key={step} className="flex flex-col gap-2 px-4">
               <div className="w-7 h-7 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
                 {icon}
@@ -218,6 +258,7 @@ function HowItWorksCard({ onDismiss }) {
               <p className="text-[10px] font-bold text-white/40 tracking-widest">{step}</p>
               <p className="text-xs font-semibold text-white leading-snug">{title}</p>
               <p className="text-[11px] text-white/65 leading-relaxed">{desc}</p>
+              {disclaimer && <p className="text-[11px] font-bold text-white leading-relaxed">{disclaimer}</p>}
             </div>
           ))}
         </div>
@@ -226,13 +267,67 @@ function HowItWorksCard({ onDismiss }) {
         <div className="relative h-px bg-white/15 mx-5" />
         <div className="relative px-5 py-3">
           <p className="text-center text-xs text-white/80 italic tracking-wide">
-            Turn an idea into an unforgettable memory
+            A travel agent that knows you — not another search engine
           </p>
         </div>
 
       </div>
     </div>
   )
+}
+
+// ─── Budget fallback (for sessions saved before server-side budget was added) ──
+
+function deriveBudget(model) {
+  const groupSize = model.groupSize || 1
+  const budgetIsPerPerson = model.budgetIsPerPerson ?? true
+  const isSingleDest = (model.legs || []).length === 1
+  const parseMoney = (v) => {
+    if (!v) return 0
+    if (typeof v === 'number') return v
+    return parseFloat(String(v).replace(/[^0-9.]/g, '')) || 0
+  }
+  const totalBudget = budgetIsPerPerson
+    ? parseMoney(model.budgetPerPerson) * groupSize
+    : parseMoney(model.budgetPerPerson)
+  const ppl = groupSize > 1 ? ` × ${groupSize} people` : ''
+  const lines = []
+  let totalNights = 0
+  let totalActivities = 0
+
+  for (const leg of model.legs || []) {
+    if (leg.confirmedFlight?.price) {
+      const ppx = parseMoney(leg.confirmedFlight.price)
+      const route = leg.confirmedFlight.origin_airport && leg.confirmedFlight.destination_airport
+        ? ` (${leg.confirmedFlight.origin_airport} → ${leg.confirmedFlight.destination_airport})` : ''
+      lines.push({
+        label: `${leg.confirmedFlight.airline || 'Flight'}${route}${isSingleDest ? ' — round trip' : ''}`,
+        amount: ppx * groupSize,
+      })
+    }
+    if (leg.confirmedHotel?.price) {
+      const ppn = parseMoney(leg.confirmedHotel.price)
+      const nights = leg.durationNights || 0
+      lines.push({ label: `${leg.confirmedHotel.name} ($${ppn}/night × ${nights} nights${ppl})`, amount: ppn * nights * groupSize })
+      totalNights += nights
+    }
+    if (leg.exitTransport?.confirmedFlight?.price) {
+      const ppx = parseMoney(leg.exitTransport.confirmedFlight.price)
+      lines.push({ label: `${leg.exitTransport.confirmedFlight.airline || 'Return flight'}`, amount: ppx * groupSize })
+    }
+    totalActivities += (leg.confirmedActivities || []).filter(a => !a.skipped).length
+  }
+
+  const totalDays = Math.max(totalNights + 1, 1)
+  if (totalActivities > 0) {
+    lines.push({ label: `Activities (${totalActivities} × ~$40/person${ppl})`, amount: totalActivities * 40 * groupSize, isEstimate: true })
+  }
+  lines.push({ label: `Food ($50/day/person${ppl} × ${totalDays} days)`, amount: 50 * totalDays * groupSize, isEstimate: true })
+  lines.push({ label: `Local transport ($20/day/person${ppl} × ${totalDays} days)`, amount: 20 * totalDays * groupSize, isEstimate: true })
+
+  const total = lines.reduce((sum, l) => sum + (l.amount || 0), 0)
+  if (lines.length === 0 || total === 0) return null
+  return { lines, total, budget: totalBudget, leftOver: totalBudget - total, groupSize }
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -274,7 +369,7 @@ export default function Chat() {
   const [menuOpen, setMenuOpen]           = useState(false)
   const [renaming, setRenaming]           = useState(false)
   const [renameValue, setRenameValue]     = useState('')
-  const [showHowItWorks, setShowHowItWorks] = useState(false)
+  const [showHowItWorks, setShowHowItWorks] = useState(true)
 
   // Complete planning state
   const [itineraryShown, setItineraryShown] = useState(false)
@@ -282,11 +377,14 @@ export default function Chat() {
   const [showSavedModal, setShowSavedModal] = useState(false)
   const [savedDestination, setSavedDestination] = useState('')
 
-  const bottomRef    = useRef(null)
-  const inputRef     = useRef(null)
-  const abortRef     = useRef(null)
-  const autoFiredRef = useRef(false)
-  const saveTimerRef = useRef(null)
+  const bottomRef       = useRef(null)
+  const scrollRef       = useRef(null)
+  const inputRef        = useRef(null)
+  const abortRef        = useRef(null)
+  const autoFiredRef    = useRef(false)
+  const saveTimerRef    = useRef(null)
+  const streamingRef    = useRef(false)
+  const userScrolledRef = useRef(false)
 
   // ── Load existing session ──────────────────────────────────────────────────
   useEffect(() => {
@@ -340,12 +438,19 @@ export default function Chat() {
 
   // ── Auto-scroll ────────────────────────────────────────────────────────────
   useEffect(() => {
+    if (userScrolledRef.current) return
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, waiting])
 
+  function handleChatScroll() {
+    const el = scrollRef.current
+    if (!el) return
+    userScrolledRef.current = el.scrollHeight - el.scrollTop - el.clientHeight > 100
+  }
+
   // ── Auto-fire prefilled destination ───────────────────────────────────────
   useEffect(() => {
-    if (!prefilledDestination || !sessionLoaded || autoFiredRef.current) return
+    if (!prefilledDestination || !isNew || !sessionLoaded || autoFiredRef.current) return
     autoFiredRef.current = true
     sendMessage(`I want to plan a trip to ${prefilledDestination}`)
   }, [prefilledDestination, sessionLoaded]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -379,7 +484,8 @@ export default function Chat() {
 
   // ── Complete planning & save itinerary ────────────────────────────────────
   async function handleCompleteTrip() {
-    const itinEntry = Object.entries(messageCards).find(([, v]) => v?.isItinerary)
+    const itinEntries = Object.entries(messageCards).filter(([, v]) => v?.isItinerary)
+    const itinEntry = itinEntries[itinEntries.length - 1]
     const itinIdx   = itinEntry ? parseInt(itinEntry[0]) : -1
     const itinText  = itinIdx >= 0 ? messages[itinIdx]?.content || '' : ''
     const bookCards = itinEntry?.[1] || {}
@@ -388,6 +494,7 @@ export default function Chat() {
     const dest = ctx?.destination || sessionTitle
 
     const cards = deriveSelectedCards(tripModel)
+    const budget = bookCards.budget ?? deriveBudget(tripModel)
 
     const trip = {
       id:            crypto.randomUUID(),
@@ -396,7 +503,7 @@ export default function Chat() {
       departureDate: ctx?.departure || '',
       returnDate:    ctx?.return    || '',
       itineraryText: itinText,
-      bookingCards:  { ...bookCards, ...cards },
+      bookingCards:  { ...bookCards, ...cards, ...(budget ? { budget } : {}) },
       savedAt:       new Date().toISOString(),
     }
 
@@ -431,7 +538,8 @@ export default function Chat() {
   // ── Send message ───────────────────────────────────────────────────────────
   async function sendMessage(overrideText = null) {
     const text = overrideText ?? input.trim()
-    if (!text || streaming) return
+    if (!text || streaming || streamingRef.current) return
+    streamingRef.current = true
 
     const userMessage  = { role: 'user', content: text }
     const nextMessages = [...messages, userMessage]
@@ -440,10 +548,7 @@ export default function Chat() {
     if (!overrideText) setInput('')
     setWaiting(true)
     setStreaming(true)
-    if (showHowItWorks) {
-      setShowHowItWorks(false)
-      supabase.from('profiles').upsert({ id: user.id, how_it_works_dismissed: true })
-    }
+    userScrolledRef.current = false
 
     const startsWithWelcome = nextMessages[0]?.role === 'assistant'
     const apiMessages = nextMessages
@@ -456,6 +561,8 @@ export default function Chat() {
     let finalMessages  = nextMessages
     let finalCards     = messageCards
     let finalTripModel = tripModelRef.current
+    // Index where the new assistant message will live for this turn's cards
+    const assistantMsgIdx = nextMessages.length
 
     try {
       const res = await fetch('http://localhost:5000/api/chat', {
@@ -475,7 +582,8 @@ export default function Chat() {
       let buffer = ''
       let assistantText = ''
 
-      setMessages(prev => { finalMessages = [...prev, { role: 'assistant', content: '' }]; return finalMessages })
+      finalMessages = [...finalMessages, { role: 'assistant', content: '' }]
+      setMessages(finalMessages)
       setWaiting(false)
 
       while (true) {
@@ -494,12 +602,10 @@ export default function Chat() {
 
           if (event.type === 'delta') {
             assistantText += event.text
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[updated.length - 1] = { role: 'assistant', content: assistantText }
-              finalMessages = updated
-              return updated
-            })
+            const updated = [...finalMessages]
+            updated[updated.length - 1] = { role: 'assistant', content: assistantText }
+            finalMessages = updated
+            setMessages(finalMessages)
 
           } else if (event.type === 'trip_model_update') {
             const newModel = mergeTripModelPatch(finalTripModel, event.data)
@@ -511,23 +617,24 @@ export default function Chat() {
           } else if (event.type === 'knowledge_bank') {
             setFetching(false)
             assistantText = ''
-            setMessages(prev => {
-              const newCards = { ...finalCards, [prev.length]: event.data }
-              finalCards = newCards
-              setMessageCards(newCards)
-              finalMessages = [...prev, { role: 'assistant', content: '' }]
-              return finalMessages
-            })
+            const lastMsg = finalMessages[finalMessages.length - 1]
+            const reuseSlot = lastMsg?.role === 'assistant' && !lastMsg.content
+            const idx = reuseSlot ? finalMessages.length - 1 : finalMessages.length
+            finalCards = { ...finalCards, [idx]: event.data }
+            setMessageCards(finalCards)
+            if (!reuseSlot) finalMessages = [...finalMessages, { role: 'assistant', content: '' }]
+            setMessages([...finalMessages])
 
           } else if (event.type === 'hotels_bank') {
             setFetching(false)
             assistantText = ''
-            setMessages(prev => {
-              const newCards = { ...finalCards, [prev.length - 1]: { hotels: event.data.hotels } }
-              finalCards = newCards
-              setMessageCards(newCards)
-              return prev
-            })
+            const lastMsg = finalMessages[finalMessages.length - 1]
+            const reuseSlot = lastMsg?.role === 'assistant' && !lastMsg.content
+            const idx = reuseSlot ? finalMessages.length - 1 : finalMessages.length
+            finalCards = { ...finalCards, [idx]: { hotels: event.data.hotels, checkIn: event.data.checkIn, checkOut: event.data.checkOut } }
+            setMessageCards(finalCards)
+            if (!reuseSlot) finalMessages = [...finalMessages, { role: 'assistant', content: '' }]
+            setMessages([...finalMessages])
 
           } else if (event.type === 'activity_bank_ready') {
             // activity bank stored in tripModel via trip_model_update
@@ -535,20 +642,24 @@ export default function Chat() {
           } else if (event.type === 'activities_bank') {
             setFetching(false)
             assistantText = ''
-            setMessages(prev => {
-              const newCards = { ...finalCards, [prev.length - 1]: { activities: event.data.activities, activityType: event.data.activityType } }
-              finalCards = newCards
-              setMessageCards(newCards)
-              return prev
-            })
+            const lastMsg = finalMessages[finalMessages.length - 1]
+            const reuseSlot = lastMsg?.role === 'assistant' && !lastMsg.content
+            const idx = reuseSlot ? finalMessages.length - 1 : finalMessages.length
+            finalCards = { ...finalCards, [idx]: { activities: event.data.activities, activityType: event.data.activityType } }
+            setMessageCards(finalCards)
+            if (!reuseSlot) finalMessages = [...finalMessages, { role: 'assistant', content: '' }]
+            setMessages([...finalMessages])
 
           } else if (event.type === 'itinerary_bank') {
-            setMessages(prev => {
-              const newCards = { ...finalCards, [prev.length - 1]: { ...event.data, isItinerary: true } }
-              finalCards = newCards
-              setMessageCards(newCards)
-              return prev
-            })
+            setFetching(false)
+            assistantText = ''
+            const lastMsg = finalMessages[finalMessages.length - 1]
+            const reuseSlot = lastMsg?.role === 'assistant' && !lastMsg.content
+            const idx = reuseSlot ? finalMessages.length - 1 : finalMessages.length
+            finalCards = { ...finalCards, [idx]: { ...event.data, isItinerary: true } }
+            setMessageCards(finalCards)
+            if (!reuseSlot) finalMessages = [...finalMessages, { role: 'assistant', content: '' }]
+            setMessages([...finalMessages])
 
           } else if (event.type === 'flight_confirmed') {
             // visual confirmation — tripModel already updated via trip_model_update
@@ -558,6 +669,11 @@ export default function Chat() {
 
           } else if (event.type === 'activity_confirmed') {
             // same
+
+          } else if (event.type === 'new_message') {
+            assistantText = ''
+            finalMessages = [...finalMessages, { role: 'assistant', content: '' }]
+            setMessages(finalMessages)
 
           } else if (event.type === 'fetching') {
             setFetching(true)
@@ -574,23 +690,20 @@ export default function Chat() {
 
           } else if (event.type === 'error') {
             setFetching(false)
-            setMessages(prev => {
-              const updated = [...prev]
-              updated[updated.length - 1] = { role: 'assistant', content: event.message || 'Something went wrong. Please try again.' }
-              finalMessages = updated
-              return updated
-            })
+            const updated = [...finalMessages]
+            updated[updated.length - 1] = { role: 'assistant', content: event.message || 'Something went wrong. Please try again.' }
+            finalMessages = updated
+            setMessages(finalMessages)
           }
         }
       }
     } catch (err) {
       if (err.name === 'AbortError') return
       setWaiting(false)
-      setMessages(prev => {
-        finalMessages = [...prev, { role: 'assistant', content: 'Sorry, I ran into a problem. Please try again.' }]
-        return finalMessages
-      })
+      finalMessages = [...finalMessages, { role: 'assistant', content: 'Sorry, I ran into a problem. Please try again.' }]
+      setMessages(finalMessages)
     } finally {
+      streamingRef.current = false
       setStreaming(false)
       setWaiting(false)
       abortRef.current = null
@@ -668,7 +781,7 @@ export default function Chat() {
       </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto py-6 space-y-5" onClick={() => setMenuOpen(false)}>
+      <div ref={scrollRef} className="flex-1 overflow-y-auto py-6 space-y-5" onScroll={handleChatScroll} onClick={() => setMenuOpen(false)}>
         {showHowItWorks && (
           <HowItWorksCard onDismiss={() => {
             setShowHowItWorks(false)
@@ -676,8 +789,11 @@ export default function Chat() {
           }} />
         )}
         {messages.map((msg, i) => {
-          const cards = msg.role === 'assistant' ? messageCards[i] : null
-          const isItinerary = cards?.isItinerary === true
+          const rawCards = msg.role === 'assistant' ? messageCards[i] : null
+          const isItinerary = rawCards?.isItinerary === true
+          const cards = isItinerary && rawCards && !rawCards.budget
+            ? { ...rawCards, budget: deriveBudget(tripModel) }
+            : rawCards
           const hasBookingCards = isItinerary && (
             cards?.flights?.length > 0 || cards?.hotels?.length > 0 || cards?.activities?.length > 0
           )
