@@ -395,7 +395,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
   const leg = model.legs[legIndex];
   const bank = leg.hotelsBank || [];
   const shown = leg.shownHotels || bank.slice(0, 3);
-  const hotelOptions = shown.map(h => `${h.id}: ${h.name}`).join(' | ');
+  const hotelOptions = shown.map((h, i) => `Option ${i + 1} (id:${h.id}): ${h.name}`).join(' | ');
 
   const legContext = buildLegContext(model);
   // Non-streaming: need full text to extract [CONFIRM]/[CHANGE] signals before acting
@@ -403,7 +403,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","id":"<exact_id>"}[/CONFIRM], emit [HOTEL_CONFIRMED].\n- If they want MORE or DIFFERENT hotels — emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE]. If they stated a preference (e.g. "something with a pool", "more central", "more upscale"), use it as the value. If they just want to see more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request for more and they gave zero indication of what they want — but if you do ask, do NOT emit [CHANGE] in that same response. End your response with the question and wait. If they've already been asked once or are expressing any preference at all, emit [CHANGE] immediately without asking anything. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from the live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
+      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","option":<1|2|3>,"id":"<id_from_list>"}[/CONFIRM], emit [HOTEL_CONFIRMED]. The "option" field is the 1-based position number (1, 2, or 3) of the hotel they chose — this is the most important field, use it to indicate which option was selected.\n- If they want MORE or DIFFERENT hotels — emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE]. If they stated a preference (e.g. "something with a pool", "more central", "more upscale"), use it as the value. If they just want to see more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request for more and they gave zero indication of what they want — but if you do ask, do NOT emit [CHANGE] in that same response. End your response with the question and wait. If they've already been asked once or are expressing any preference at all, emit [CHANGE] immediately without asking anything. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from the live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
     ]
   );
 
@@ -471,18 +471,34 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     return { modelPatch: { groupSize: newSize, legs: [{ index: legIndex, hotelsBank: [] }] }, continue: true };
   }
 
-  if (!signals.confirm?.id && !signals.hotelConfirmed) return { modelPatch: null, continue: false };
+  if (!signals.confirm?.option && !signals.confirm?.id && !signals.hotelConfirmed) return { modelPatch: null, continue: false };
 
-  // Primary: exact ID from [CONFIRM] tag
-  let confirmedHotel = signals.confirm?.id ? bank.find(h => h.id === signals.confirm.id) : null;
+  // Primary: position from [CONFIRM] option field (most reliable — Claude picks 1, 2, or 3)
+  let confirmedHotel = null;
+  const pos = parseInt(signals.confirm?.option);
+  if (pos >= 1 && pos <= shown.length) confirmedHotel = shown[pos - 1];
 
-  // Secondary: match by hotel name in the user's last message
+  // Secondary: exact ID match
+  if (!confirmedHotel && signals.confirm?.id) confirmedHotel = bank.find(h => h.id === signals.confirm.id) || null;
+
+  // Tertiary: hotel name in user's last message
   if (!confirmedHotel) {
     const userText = (messages[messages.length - 1]?.content || '').toLowerCase();
     confirmedHotel = shown.find(h => h.name && userText.includes(h.name.toLowerCase().split(/\s+/).slice(0, 2).join(' ')));
   }
 
-  // Fallback: first shown hotel
+  // Last resort: parse "option N" / ordinal from user message
+  if (!confirmedHotel) {
+    const userText = (messages[messages.length - 1]?.content || '').toLowerCase();
+    const m = userText.match(/\boption\s*(\d+)\b|\b(first|1st|second|2nd|third|3rd)\b/);
+    if (m) {
+      const n = m[1] ? parseInt(m[1]) - 1
+        : ['first', '1st'].includes(m[2]) ? 0
+        : ['second', '2nd'].includes(m[2]) ? 1 : 2;
+      confirmedHotel = shown[n] || null;
+    }
+  }
+
   if (!confirmedHotel) confirmedHotel = shown[0];
   if (!confirmedHotel) return { modelPatch: null, continue: false };
   sendFn({ type: 'marker', content: '[HOTEL_CONFIRMED]' });

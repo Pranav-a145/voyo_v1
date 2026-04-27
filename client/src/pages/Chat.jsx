@@ -255,10 +255,10 @@ function HowItWorksCard({ onDismiss }) {
               <div className="w-7 h-7 rounded-lg bg-white/20 flex items-center justify-center shrink-0">
                 {icon}
               </div>
-              <p className="text-[10px] font-bold text-white/40 tracking-widest">{step}</p>
-              <p className="text-xs font-semibold text-white leading-snug">{title}</p>
-              <p className="text-[11px] text-white/65 leading-relaxed">{desc}</p>
-              {disclaimer && <p className="text-[11px] font-bold text-white leading-relaxed">{disclaimer}</p>}
+              <p className="text-[13px] font-bold text-white/40 tracking-widest">{step}</p>
+              <p className="text-[15px] font-semibold text-white leading-snug">{title}</p>
+              <p className="text-[13px] text-white/65 leading-relaxed">{desc}</p>
+              {disclaimer && <p className="text-[13px] font-bold text-white leading-relaxed">{disclaimer}</p>}
             </div>
           ))}
         </div>

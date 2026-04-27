@@ -47,7 +47,7 @@ export async function fetchFlights(origin, destination, departureDate, returnDat
     arrival_id: destination_code,
     outbound_date: departureDate,
     return_date: returnDate,
-    adults: String(passengers),
+    adults: '1',
     type: '1',
     api_key: process.env.SERPAPI_KEY,
   });
@@ -174,7 +174,7 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
   const mapped = (data.properties || [])
     .filter((h) => h.link)
     .slice(0, 15)
-    .map((h) => {
+    .map((h, i) => {
       const thumbnail =
         h.images?.[0]?.original_image ??
         h.images?.[0]?.thumbnail ??
@@ -183,6 +183,7 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
         null;
       console.log(`[hotel thumbnail] ${h.name}: ${thumbnail ? thumbnail.slice(0, 80) : 'NULL'}`);
       return {
+        id: `hotel_${i}`,
         name: h.name,
         price: h.rate_per_night?.lowest ?? null,
         rating: h.overall_rating ?? null,
