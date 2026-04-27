@@ -1,6 +1,7 @@
 export function initialTripModel() {
   return {
     tripType: null,
+    isMultiCity: false,
     origin: null,
     groupSize: null,
     budgetPerPerson: null,

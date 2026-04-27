@@ -108,6 +108,18 @@ export function resolveAction(model) {
       if (legs.length === 1) {
         return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
       }
+      // Multi-city: inter-city transit is the NEXT leg's arrival flight (already one-way).
+      // Non-last legs skip exit entirely. Only the last leg fetches a one-way return home.
+      const isMultiCity = model.isMultiCity || (model.legs?.length > 1);
+      if (isMultiCity) {
+        if (!isLastLeg)
+          return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
+        if (!leg.exitTransport?.flightsBank?.length)
+          return { type: 'fetch_exit_flight',  legIndex: currentLegIndex };
+        if (!leg.exitTransport?.confirmedFlight)
+          return { type: 'select_exit_flight', legIndex: currentLegIndex };
+        return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
+      }
       if (!leg.exitTransport?.type) {
         if (isLastLeg) {
           return leg.exitTransport?.flightsBank?.length
@@ -175,6 +187,7 @@ async function executeGathering({ model, messages, systemPrompt, sendFn }) {
 
   const modelPatch = {
     tripType: tripType || 'single',
+    isMultiCity: initialLegs.length > 1,
     origin: resolvedOrigin,
     groupSize: groupSize || model.groupSize,
     budgetPerPerson: budgetPerPerson || model.budgetPerPerson,
@@ -207,15 +220,30 @@ async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legI
   const leg = model.legs[legIndex];
   sendFn({ type: 'fetching' });
 
-  const origin      = isExit ? leg.city : model.origin;
-  const destination = isExit ? (model.legs[legIndex + 1]?.city || model.origin) : leg.city;
-  const depDate     = isExit ? leg.departureDate : leg.arrivalDate;
-  const lastLeg     = model.legs.at(-1);
-  const retDate     = lastLeg?.departureDate ?? null;
+  const isMultiCity = model.isMultiCity || (model.legs?.length > 1);
+  // Multi-city: all flights are one-way. Single-city: round-trip arrival.
+  const flightType = isMultiCity ? '2' : '1';
 
-  console.log(`[fetch_flights] leg ${legIndex} | ${origin} → ${destination} | ${depDate}`);
+  // For arrival flights on legs 1+ in multi-city, origin is the previous leg's city (not home)
+  let origin, destination;
+  if (isExit) {
+    origin      = leg.city;
+    destination = model.legs[legIndex + 1]?.city || model.origin;
+  } else if (isMultiCity && legIndex > 0) {
+    origin      = model.legs[legIndex - 1].city;
+    destination = leg.city;
+  } else {
+    origin      = model.origin;
+    destination = leg.city;
+  }
 
-  const flightsRaw = await fetchFlights(origin, destination, depDate, retDate, model.groupSize || 1)
+  const depDate = isExit ? leg.departureDate : leg.arrivalDate;
+  const lastLeg = model.legs.at(-1);
+  const retDate = flightType === '1' ? (lastLeg?.departureDate ?? null) : null;
+
+  console.log(`[fetch_flights] leg ${legIndex} ${isExit ? '(exit)' : ''} | ${origin} → ${destination} | ${depDate} | type:${flightType}`);
+
+  const flightsRaw = await fetchFlights(origin, destination, depDate, retDate, model.groupSize || 1, flightType)
     .catch(e => { console.error('[fetch_flights] error:', e.message); return []; });
 
   const preference = isExit ? leg.exitTransport?.flightPreference : leg.flightPreference;
