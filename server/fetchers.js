@@ -37,20 +37,22 @@ async function resolveIataCodes(origin, destination) {
 
 // ─── Exported fetchers ────────────────────────────────────────────────────────
 
-export async function fetchFlights(origin, destination, departureDate, returnDate, passengers) {
+export async function fetchFlights(origin, destination, departureDate, returnDate, passengers, flightType = '1') {
   const { origin_code, destination_code } = await resolveIataCodes(origin, destination);
   console.log(`\n─── IATA codes resolved: ${origin} → ${origin_code}, ${destination} → ${destination_code}`);
 
-  const params = new URLSearchParams({
+  const paramObj = {
     engine: 'google_flights',
     departure_id: origin_code,
     arrival_id: destination_code,
     outbound_date: departureDate,
-    return_date: returnDate,
     adults: '1',
-    type: '1',
+    type: flightType,
     api_key: process.env.SERPAPI_KEY,
-  });
+  };
+  if (flightType === '1' && returnDate) paramObj.return_date = returnDate;
+
+  const params = new URLSearchParams(paramObj);
 
   const url = `https://serpapi.com/search?${params}`;
   console.log('\n─── fetchFlights REQUEST ───────────────────────────────');
@@ -93,7 +95,7 @@ export async function fetchFlights(origin, destination, departureDate, returnDat
       layover_airport: layoverAirport,
       departure_token: f.departure_token,
       search_url: searchUrl,
-      isRoundTrip: true,
+      isRoundTrip: flightType === '1',
     };
   });
 }

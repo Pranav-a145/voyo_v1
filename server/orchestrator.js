@@ -108,6 +108,18 @@ export function resolveAction(model) {
       if (legs.length === 1) {
         return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
       }
+      // Multi-city: inter-city transit is the NEXT leg's arrival flight (already one-way).
+      // Non-last legs skip exit entirely. Only the last leg fetches a one-way return home.
+      const isMultiCity = model.isMultiCity || (model.legs?.length > 1);
+      if (isMultiCity) {
+        if (!isLastLeg)
+          return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
+        if (!leg.exitTransport?.flightsBank?.length)
+          return { type: 'fetch_exit_flight',  legIndex: currentLegIndex };
+        if (!leg.exitTransport?.confirmedFlight)
+          return { type: 'select_exit_flight', legIndex: currentLegIndex };
+        return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'complete' };
+      }
       if (!leg.exitTransport?.type) {
         if (isLastLeg) {
           return leg.exitTransport?.flightsBank?.length
@@ -175,6 +187,7 @@ async function executeGathering({ model, messages, systemPrompt, sendFn }) {
 
   const modelPatch = {
     tripType: tripType || 'single',
+    isMultiCity: initialLegs.length > 1,
     origin: resolvedOrigin,
     groupSize: groupSize || model.groupSize,
     budgetPerPerson: budgetPerPerson || model.budgetPerPerson,
@@ -207,15 +220,30 @@ async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legI
   const leg = model.legs[legIndex];
   sendFn({ type: 'fetching' });
 
-  const origin      = isExit ? leg.city : model.origin;
-  const destination = isExit ? (model.legs[legIndex + 1]?.city || model.origin) : leg.city;
-  const depDate     = isExit ? leg.departureDate : leg.arrivalDate;
-  const lastLeg     = model.legs.at(-1);
-  const retDate     = lastLeg?.departureDate ?? null;
+  const isMultiCity = model.isMultiCity || (model.legs?.length > 1);
+  // Multi-city: all flights are one-way. Single-city: round-trip arrival.
+  const flightType = isMultiCity ? '2' : '1';
 
-  console.log(`[fetch_flights] leg ${legIndex} | ${origin} → ${destination} | ${depDate}`);
+  // For arrival flights on legs 1+ in multi-city, origin is the previous leg's city (not home)
+  let origin, destination;
+  if (isExit) {
+    origin      = leg.city;
+    destination = model.legs[legIndex + 1]?.city || model.origin;
+  } else if (isMultiCity && legIndex > 0) {
+    origin      = model.legs[legIndex - 1].city;
+    destination = leg.city;
+  } else {
+    origin      = model.origin;
+    destination = leg.city;
+  }
 
-  const flightsRaw = await fetchFlights(origin, destination, depDate, retDate, model.groupSize || 1)
+  const depDate = isExit ? leg.departureDate : leg.arrivalDate;
+  const lastLeg = model.legs.at(-1);
+  const retDate = flightType === '1' ? (lastLeg?.departureDate ?? null) : null;
+
+  console.log(`[fetch_flights] leg ${legIndex} ${isExit ? '(exit)' : ''} | ${origin} → ${destination} | ${depDate} | type:${flightType}`);
+
+  const flightsRaw = await fetchFlights(origin, destination, depDate, retDate, model.groupSize || 1, flightType)
     .catch(e => { console.error('[fetch_flights] error:', e.message); return []; });
 
   const preference = isExit ? leg.exitTransport?.flightPreference : leg.flightPreference;
@@ -277,7 +305,7 @@ async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legI
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[FLIGHT_STAGE] The traveler has been shown these flight options: ${flightOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge it warmly, emit [CONFIRM]{"leg":${legIndex},"type":"${isExit ? 'exit_flight' : 'flight'}","id":"<exact_id>"}[/CONFIRM], emit [FLIGHT_CONFIRMED].\n- If they want MORE or DIFFERENT flights — emit [CHANGE]{"leg":${legIndex},"field":"${isExit ? 'exitTransport.flightPreference' : 'flightPreference'}","value":"<preference or 'more options'>"}[/CHANGE]. Use their stated preference (cheaper, direct, etc.) if given; otherwise use "more options". You may ask ONE clarifying question ONLY if this is clearly their first request and they gave zero indication of what they want. If they've already been asked or show any impatience, emit [CHANGE] immediately. CRITICAL: Never invent flight options yourself — always emit [CHANGE] so the system fetches real data.\n- If genuinely undecided, help them decide.` },
+      { role: 'user', content: `[FLIGHT_STAGE] The traveler has been shown these flight options: ${flightOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge it warmly, emit [CONFIRM]{"leg":${legIndex},"type":"${isExit ? 'exit_flight' : 'flight'}","id":"<exact_id>"}[/CONFIRM], emit [FLIGHT_CONFIRMED].${isExit ? ' IMPORTANT: This is a return/departure flight home. After confirming their choice, do NOT mention hotels, activities, or any next booking steps. Just acknowledge their selection warmly and that is all.' : ''}\n- If they want MORE or DIFFERENT flights — emit [CHANGE]{"leg":${legIndex},"field":"${isExit ? 'exitTransport.flightPreference' : 'flightPreference'}","value":"<preference or 'more options'>"}[/CHANGE]. Use their stated preference (cheaper, direct, etc.) if given; otherwise use "more options". You may ask ONE clarifying question ONLY if this is clearly their first request and they gave zero indication of what they want. If they've already been asked or show any impatience, emit [CHANGE] immediately. CRITICAL: Never invent flight options yourself — always emit [CHANGE] so the system fetches real data.\n- If genuinely undecided, help them decide.` },
     ]
   );
 
@@ -403,7 +431,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","option":<1|2|3>,"id":"<id_from_list>"}[/CONFIRM], emit [HOTEL_CONFIRMED]. The "option" field is the 1-based position number (1, 2, or 3) of the hotel they chose — this is the most important field, use it to indicate which option was selected.\n- If they want MORE or DIFFERENT hotels — emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE]. If they stated a preference (e.g. "something with a pool", "more central", "more upscale"), use it as the value. If they just want to see more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request for more and they gave zero indication of what they want — but if you do ask, do NOT emit [CHANGE] in that same response. End your response with the question and wait. If they've already been asked once or are expressing any preference at all, emit [CHANGE] immediately without asking anything. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from the live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
+      { role: 'user', content: `[HOTEL_STAGE] The traveler has been shown these hotel options: ${hotelOptions}. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","option":<1|2|3>,"id":"<id_from_list>"}[/CONFIRM], emit [HOTEL_CONFIRMED]. The "option" field is the 1-based position number (1, 2, or 3) of the hotel they chose — this is the most important field, use it to indicate which option was selected.\n- If they want MORE or DIFFERENT hotels — CRITICAL: emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE] IN THIS SAME RESPONSE, immediately. Do NOT say "Got it, let me pull up..." or any acknowledgement without also emitting [CHANGE] in the same message. ANY style preference word ("upscale", "cheaper", "boutique", "more central", "different", "more options") means emit [CHANGE] right now. If they stated a preference (e.g. "more upscale", "something with a pool"), use it as the value. If they just want more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request and they gave absolutely zero indication of what style they want — but if you ask, still emit [CHANGE] in that same response so the system starts fetching. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
     ]
   );
 
@@ -499,7 +527,6 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     }
   }
 
-  if (!confirmedHotel) confirmedHotel = shown[0];
   if (!confirmedHotel) return { modelPatch: null, continue: false };
   sendFn({ type: 'marker', content: '[HOTEL_CONFIRMED]' });
   sendFn({ type: 'hotel_confirmed', data: { hotel: confirmedHotel } });

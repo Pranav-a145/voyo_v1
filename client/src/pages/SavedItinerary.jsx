@@ -54,7 +54,7 @@ function TripHero({ trip }) {
     const cached = getCachedHero(city)
     if (cached !== undefined) { setImgSrc(cached); setLoaded(true); return }
 
-    fetch(`http://localhost:5000/api/destination-image?city=${encodeURIComponent(city)}&size=hero`)
+    fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/destination-image?city=${encodeURIComponent(city)}&size=hero`)
       .then(r => r.json())
       .then(d => { setCachedHero(city, d.url); setImgSrc(d.url || null) })
       .catch(() => {})
