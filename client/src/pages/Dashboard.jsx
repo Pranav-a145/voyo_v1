@@ -95,7 +95,7 @@ async function loadRecommendations(profile, userId) {
   }
 
   // Fetch 12 fresh recs from server
-  const res = await fetch('http://localhost:5000/api/recommendations', {
+  const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/recommendations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ profile }),

@@ -36,7 +36,7 @@ export default function DestinationCard({ destination, reason, bestTime, persona
     const cached = getCachedImage(city)
     if (cached !== undefined) { setImgSrc(cached); setImgLoading(false); return }
 
-    fetch(`http://localhost:5000/api/destination-image?city=${encodeURIComponent(city)}`)
+    fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000'}/api/destination-image?city=${encodeURIComponent(city)}`)
       .then(r => r.json())
       .then(d => { setCachedImage(city, d.url); setImgSrc(d.url || null) })
       .catch(() => {})
