@@ -85,7 +85,8 @@ export function resolveAction(model) {
       return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'hotel' };
 
     case 'hotel':
-      if (!leg.hotelStyleAsked)      return { type: 'ask_hotel_style', legIndex: currentLegIndex };
+      // Skip style question if style was already captured during gathering
+      if (!leg.hotelStyleAsked && !leg.hotelStyle) return { type: 'ask_hotel_style', legIndex: currentLegIndex };
       if (!leg.hotelsBank?.length)   return { type: 'fetch_hotels',    legIndex: currentLegIndex };
       if (!leg.confirmedHotel)       return { type: 'select_hotel',    legIndex: currentLegIndex };
       return { type: 'advance_step', legIndex: currentLegIndex, nextStep: 'must_sees' };
@@ -399,6 +400,12 @@ async function executeFetchHotels({ model, messages, systemPrompt, sendFn, legIn
     } catch {}
   }
 
+  // If no hotels came back, tell the user and let them retry
+  if (hotels.length === 0) {
+    sendFn({ type: 'delta', text: `I'm having trouble pulling up hotels for ${leg.city.split(',')[0]} right now — just say "show me hotels" and I'll try again.` });
+    return { modelPatch: { legs: [{ index: legIndex, hotelStyleAsked: true }] }, continue: false };
+  }
+
   // Send cards FIRST so the client creates a fresh message slot, then stream text into it
   sendFn({ type: 'hotels_bank', data: { hotels: hotelCards, hotelsBankFull: hotels, checkIn: leg.arrivalDate, checkOut: leg.departureDate } });
 
@@ -414,7 +421,7 @@ async function executeFetchHotels({ model, messages, systemPrompt, sendFn, legIn
   );
 
   const allShownHotelIds = hotelCards.map(h => h.id);
-  return { modelPatch: { legs: [{ index: legIndex, hotelsBank: hotels, shownHotels: hotelCards, hotelStyle: hotelStyle || null, allShownHotelIds }] }, continue: false };
+  return { modelPatch: { legs: [{ index: legIndex, hotelsBank: hotels, shownHotels: hotelCards, hotelStyle: hotelStyle || null, allShownHotelIds, hotelStyleAsked: true }] }, continue: false };
 }
 
 // ── Select hotel (user is choosing) ───────────────────────────────────────────

@@ -182,7 +182,7 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
   }
 
   const mapped = properties
-    .filter((h) => h.link)
+    .filter((h) => h.name)
     .slice(0, 15)
     .map((h, i) => {
       const thumbnail =
