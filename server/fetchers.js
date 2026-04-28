@@ -149,31 +149,39 @@ export function sortHotelPoolByStyle(pool, style) {
 export async function fetchHotels(city, checkinDate, checkoutDate, guests, style) {
   const cityName = city.split(',')[0].trim();
 
-  const params = new URLSearchParams({
-    engine: 'google_hotels',
-    q: hotelStyleQuery(cityName, style),
-    check_in_date: checkinDate,
-    check_out_date: checkoutDate,
-    adults: String(guests),
-    api_key: process.env.SERPAPI_KEY,
-  });
-  const url = `https://serpapi.com/search?${params}`;
-  console.log('\n─── fetchHotels REQUEST ────────────────────────────────');
-  console.log('URL:', url);
-  console.log('Params:', Object.fromEntries(params));
+  const doFetch = async (query) => {
+    const params = new URLSearchParams({
+      engine: 'google_hotels',
+      q: query,
+      check_in_date: checkinDate,
+      check_out_date: checkoutDate,
+      adults: String(guests),
+      api_key: process.env.SERPAPI_KEY,
+    });
+    const url = `https://serpapi.com/search?${params}`;
+    console.log('\n─── fetchHotels REQUEST ────────────────────────────────');
+    console.log('URL:', url);
+    const res = await fetch(url);
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`SerpAPI hotels error ${res.status}: ${errText}`);
+    }
+    const data = await res.json();
+    console.log('─── fetchHotels RESPONSE (HTTP', res.status, ')─────────────');
+    console.log(JSON.stringify(data, null, 2));
+    console.log('────────────────────────────────────────────────────────\n');
+    return data.properties || [];
+  };
 
-  const res = await fetch(url);
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`SerpAPI hotels error ${res.status}: ${errText}`);
+  let properties = await doFetch(hotelStyleQuery(cityName, style));
+
+  // Fallback to generic query if styled query returns empty
+  if (properties.length === 0 && style) {
+    console.log(`[fetchHotels] styled query empty, retrying with generic query for ${cityName}`);
+    properties = await doFetch(`hotels in ${cityName}`);
   }
-  const data = await res.json();
 
-  console.log('─── fetchHotels RESPONSE (HTTP', res.status, ')─────────────');
-  console.log(JSON.stringify(data, null, 2));
-  console.log('────────────────────────────────────────────────────────\n');
-
-  const mapped = (data.properties || [])
+  const mapped = properties
     .filter((h) => h.link)
     .slice(0, 15)
     .map((h, i) => {
