@@ -283,7 +283,7 @@ async function executeFetchFlights({ model, messages, systemPrompt, sendFn, legI
     [
       ...messages,
       { role: 'assistant', content: isExit ? `Let me find the best options to get you from ${leg.city.split(',')[0]} to ${destination.split(',')[0]}.` : "Let me pull up the best flights for you!" },
-      { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ flights: flightCardsReadable }, null, 2)}\n[/KNOWLEDGE_BANK]\n\n[FLIGHTS_SHOWN]\n\nPresent ONLY these 3 flights using their exact details. Ask which one they prefer.` },
+      { role: 'user', content: `[KNOWLEDGE_BANK]\n${JSON.stringify({ flights: flightCardsReadable }, null, 2)}\n[/KNOWLEDGE_BANK]\n\n[FLIGHTS_SHOWN]\n\nPresent ONLY these 3 flights using their exact details. Ask which one they prefer.${isExit ? ' IMPORTANT: This is their return flight home — do NOT mention hotels, activities, or any next booking steps after this. Just present the options and ask which they prefer.' : ''}` },
     ],
     sendFn
   );

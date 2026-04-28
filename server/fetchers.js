@@ -186,10 +186,10 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
     .slice(0, 15)
     .map((h, i) => {
       const thumbnail =
+        h.serpapi_thumbnail ??
+        h.thumbnail ??
         h.images?.[0]?.original_image ??
         h.images?.[0]?.thumbnail ??
-        h.thumbnail ??
-        h.serpapi_thumbnail ??
         null;
       console.log(`[hotel thumbnail] ${h.name}: ${thumbnail ? thumbnail.slice(0, 80) : 'NULL'}`);
       return {
@@ -203,6 +203,40 @@ export async function fetchHotels(city, checkinDate, checkoutDate, guests, style
       };
     });
   return sortHotelPoolByStyle(mapped, style);
+}
+
+const ACTIVITY_QUERY_MAP = {
+  'hiking':             ['hiking trails', 'nature trails', 'trekking'],
+  'water activities':   ['boat tours', 'water sports', 'snorkeling', 'kayaking'],
+  'water sports':       ['water sports', 'boat tours', 'snorkeling'],
+  'swimming':           ['beaches', 'swimming spots', 'lidos'],
+  'beaches':            ['beaches', 'beach'],
+  'nightlife':          ['bars', 'nightclubs', 'live music'],
+  'shopping':           ['shopping', 'markets', 'boutiques'],
+  'food':               ['restaurants', 'food tours', 'local cuisine'],
+  'food & drink':       ['restaurants', 'food tours', 'local cuisine'],
+  'museums':            ['museums', 'art galleries'],
+  'art':                ['art galleries', 'museums', 'art'],
+  'history':            ['historical sites', 'monuments', 'ruins'],
+  'culture':            ['cultural sites', 'historical landmarks', 'museums'],
+  'exploration':        ['tourist attractions', 'points of interest', 'sightseeing'],
+  'adventure':          ['adventure sports', 'outdoor activities', 'adventure tours'],
+  'cycling':            ['cycling routes', 'bike rentals', 'bicycle tours'],
+  'yoga':               ['yoga studios', 'wellness centers'],
+  'spa':                ['spas', 'wellness centers', 'massage'],
+  'wine':               ['wineries', 'wine tasting', 'vineyards'],
+  'nature':             ['nature parks', 'botanical gardens', 'nature reserves'],
+  'photography':        ['viewpoints', 'scenic spots', 'tourist attractions'],
+  'family':             ['family attractions', 'parks', 'zoos'],
+  'kids':               ['family attractions', 'parks', 'zoos'],
+};
+
+function activitySearchQueries(type) {
+  const t = type.toLowerCase().trim();
+  for (const [key, queries] of Object.entries(ACTIVITY_QUERY_MAP)) {
+    if (t.includes(key) || key.includes(t)) return queries;
+  }
+  return [type];
 }
 
 export async function fetchActivities(destination, activityTypes) {
@@ -224,22 +258,34 @@ export async function fetchActivities(destination, activityTypes) {
     return [...withRating, ...noRating];
   };
 
-  const fetchOne = async (type) => {
+  const fetchRaw = async (query) => {
     const params = new URLSearchParams({
       engine: 'google_maps',
-      q: `${type} in ${destination}`,
+      q: `${query} in ${destination}`,
       type: 'search',
       api_key: process.env.SERPAPI_KEY,
     });
     try {
       const res = await fetch(`https://serpapi.com/search?${params}`);
       const data = await res.json();
-      const results = (data.local_results || []).slice(0, 20);
-      if (results[0]) {
-        console.log(`[fetchActivities] raw first result for "${type}":`, JSON.stringify(results[0], null, 2));
-      }
-      return results;
+      return (data.local_results || []).slice(0, 20);
     } catch { return []; }
+  };
+
+  const fetchOne = async (type) => {
+    const queries = activitySearchQueries(type);
+    for (const query of queries) {
+      const results = await fetchRaw(query);
+      if (results.length > 0) {
+        if (results[0]) {
+          console.log(`[fetchActivities] "${type}" resolved via query "${query}", first result:`, results[0].title);
+        }
+        return results;
+      }
+      console.log(`[fetchActivities] "${type}" → query "${query}" returned 0 results, trying next...`);
+    }
+    console.log(`[fetchActivities] all queries exhausted for "${type}", returning empty`);
+    return [];
   };
 
   const allResults = await Promise.all(types.map(fetchOne));
@@ -271,5 +317,10 @@ export async function fetchActivities(destination, activityTypes) {
   }
 
   console.log('[fetchActivities]', types.map(t => `${t}:${byType[t].length}`).join(', '));
+  for (const type of types) {
+    (byType[type] || []).slice(0, 3).forEach(a => {
+      console.log(`[activity thumbnail] ${a.title}: ${a.thumbnail ? a.thumbnail.slice(0, 80) : 'NULL'}`);
+    });
+  }
   return { types, byType };
 }
