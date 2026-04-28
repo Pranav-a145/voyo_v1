@@ -14,6 +14,11 @@ const FALLBACK_GRADIENTS = [
   'from-indigo-400 to-blue-600',
 ]
 
+function displayDestination(dest) {
+  if (!dest) return ''
+  return dest.split(' + ').map(c => c.split(',')[0].trim()).join(' + ')
+}
+
 function formatDateRange(dep, ret) {
   if (!dep) return null
   try {
@@ -72,7 +77,7 @@ function TripHero({ trip }) {
       )}
       <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/15 to-transparent" />
       <div className="absolute bottom-0 left-0 right-0 px-6 pb-7">
-        <h1 className="text-2xl font-bold text-white leading-tight">{trip.destination}</h1>
+        <h1 className="text-2xl font-bold text-white leading-tight">{displayDestination(trip.destination)}</h1>
         <div className="flex items-center flex-wrap gap-3 mt-2">
           {dateRange && (
             <div className="flex items-center gap-1.5">
@@ -253,7 +258,7 @@ export default function SavedItinerary() {
           Trips
         </button>
         <span className="flex-1 text-sm font-semibold text-gray-900 truncate text-center">
-          {trip.destination?.split(',')[0]}
+          {displayDestination(trip.destination)}
         </span>
         <div className="w-14 shrink-0" />
       </header>

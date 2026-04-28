@@ -5,8 +5,13 @@ import { useAuth } from '../context/AuthContext'
 import AppLayout from '../components/AppLayout'
 import AddManualTripModal from '../components/AddManualTripModal'
 
+function displayDestination(dest) {
+  if (!dest) return ''
+  return dest.split(' + ').map(c => c.split(',')[0].trim()).join(' + ')
+}
+
 function getTripSummary(trip) {
-  const dest = trip.destination?.split(',')[0] || 'your destination'
+  const dest = displayDestination(trip.destination) || 'your destination'
 
   if (trip.source === 'inapp' && trip.itineraryText) {
     const plain = trip.itineraryText
@@ -241,7 +246,7 @@ export default function UpcomingTrips() {
                   <TripImage destination={trip.destination} source={trip.source} />
                   <div className="p-4">
                     <h3 className="text-base font-semibold text-gray-900 leading-snug truncate">
-                      {trip.destination?.split(',')[0]}
+                      {displayDestination(trip.destination)}
                     </h3>
                     {formatDateRange(trip.departureDate, trip.returnDate) && (
                       <p className="text-xs text-gray-400 mt-1">
