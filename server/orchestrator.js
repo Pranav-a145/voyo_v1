@@ -439,6 +439,19 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
   const { cleaned: chatCleaned } = extractAndStripBlocks(chatText);
   if (chatCleaned) sendFn({ type: 'delta', text: chatCleaned });
 
+  // Fallback: if Claude failed to emit [CHANGE] but user clearly wants different options
+  if (!signals.change && !signals.confirm?.option && !signals.confirm?.id && !signals.hotelConfirmed) {
+    const userMsg = (messages[messages.length - 1]?.content || '').toLowerCase();
+    if (/more|different|other|upscale|luxury|budget|cheap|boutique|upmarket|nicer|fancier|higher.?end|5.?star/i.test(userMsg)) {
+      let inferredPref = 'more options';
+      if (/upscale|luxury|high.?end|5.?star|fancy|premium|nicer|fancier|upmarket/i.test(userMsg)) inferredPref = 'upscale luxury';
+      else if (/budget|cheap|affordable/i.test(userMsg)) inferredPref = 'budget';
+      else if (/boutique/i.test(userMsg)) inferredPref = 'boutique';
+      console.log(`[select_hotel] inferred hotelPreference from user msg: "${inferredPref}"`);
+      signals.change = { field: 'hotelPreference', value: inferredPref };
+    }
+  }
+
   if (signals.change?.field === 'hotelPreference') {
     const pref = signals.change.value;
     const prefIsUpscale = /luxury|high.?end|5.?star|upscale|fancy|premium/i.test(pref || '');
