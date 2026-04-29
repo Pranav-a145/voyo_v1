@@ -211,7 +211,7 @@ const ACTIVITY_QUERY_MAP = {
   'water sports':       ['water sports', 'boat tours', 'snorkeling'],
   'swimming':           ['beaches', 'swimming spots', 'lidos'],
   'beaches':            ['beaches', 'beach'],
-  'nightlife':          ['bars', 'nightclubs', 'live music'],
+  'nightlife':          ['nightclubs', 'clubs', 'live music', 'bars'],
   'shopping':           ['shopping', 'markets', 'boutiques'],
   'food':               ['restaurants', 'food tours', 'local cuisine'],
   'food & drink':       ['restaurants', 'food tours', 'local cuisine'],
