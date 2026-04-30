@@ -258,6 +258,8 @@ export async function fetchActivities(destination, activityTypes) {
     return [...withRating, ...noRating];
   };
 
+  const destinationCity = destination.split(',')[0].trim().toLowerCase();
+
   const fetchRaw = async (query) => {
     const params = new URLSearchParams({
       engine: 'google_maps',
@@ -268,7 +270,12 @@ export async function fetchActivities(destination, activityTypes) {
     try {
       const res = await fetch(`https://serpapi.com/search?${params}`);
       const data = await res.json();
-      return (data.local_results || []).slice(0, 20);
+      const results = (data.local_results || []).slice(0, 20);
+      // Filter out results whose address clearly belongs to a different city
+      return results.filter(r => {
+        if (!r.address) return true;
+        return r.address.toLowerCase().includes(destinationCity);
+      });
     } catch { return []; }
   };
 

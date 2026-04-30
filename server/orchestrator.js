@@ -333,15 +333,17 @@ async function executeSelectFlight({ model, messages, systemPrompt, sendFn, legI
   const userText = (messages[messages.length - 1]?.content || '').toLowerCase();
   let confirmedFlight = null;
 
-  // Primary: airline name match in user message across all shown flights
-  confirmedFlight = flightShownBank.find(f => f.airline && userText.includes(f.airline.toLowerCase())) || null;
-
-  // Secondary: exact ID match across all shown flights
-  if (!confirmedFlight && signals.confirm?.id) {
+  // Primary: Claude's ID — Claude sees the full shown bank and resolves partial names
+  if (signals.confirm?.id) {
     confirmedFlight = flightShownBank.find(f => f.id === signals.confirm.id) || null;
   }
 
-  // Fallback: first shown flight (covers "that one" / "looks good" type replies)
+  // Fallback: airline name match in user message
+  if (!confirmedFlight) {
+    confirmedFlight = flightShownBank.find(f => f.airline && userText.includes(f.airline.toLowerCase())) || null;
+  }
+
+  // Last resort: first shown flight (covers "that one" / "looks good" type replies)
   if (!confirmedFlight) confirmedFlight = shown[0] || null;
   if (!confirmedFlight) return { modelPatch: null, continue: false };
   sendFn({ type: 'marker', content: '[FLIGHT_CONFIRMED]' });
@@ -450,7 +452,8 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
   const bank = leg.hotelsBank || [];
   const shown = leg.shownHotels || bank.slice(0, 3);
   const allShownHotels = leg.hotelShownBank?.length ? leg.hotelShownBank : shown;
-  const hotelOptions = allShownHotels.map(h => `(id:${h.id}): ${h.name}`).join(' | ');
+  // Use sequential display numbers — avoids Claude guessing opaque non-sequential IDs
+  const hotelOptions = allShownHotels.map((h, i) => `Option ${i + 1}: ${h.name}${h.price ? ` ($${h.price}/night)` : ''}`).join(' | ');
 
   const legContext = buildLegContext(model);
   // Non-streaming: need full text to extract [CONFIRM]/[CHANGE] signals before acting
@@ -458,7 +461,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     systemPrompt + (legContext ? '\n\n' + legContext : ''),
     [
       ...messages,
-      { role: 'user', content: `[HOTEL_STAGE] All hotel options shown to the traveler across all rounds: ${hotelOptions}. The traveler may use a partial name or misspelling — use your best judgment to match what they said to the correct hotel and emit its exact id. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","id":"<exact_id_from_list>"}[/CONFIRM], emit [HOTEL_CONFIRMED].\n- If they want MORE or DIFFERENT hotels — CRITICAL: emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE] IN THIS SAME RESPONSE, immediately. Do NOT say "Got it, let me pull up..." or any acknowledgement without also emitting [CHANGE] in the same message. ANY style preference word ("upscale", "cheaper", "boutique", "more central", "different", "more options") means emit [CHANGE] right now. If they stated a preference (e.g. "more upscale", "something with a pool"), use it as the value. If they just want more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request and they gave absolutely zero indication of what style they want — but if you ask, still emit [CHANGE] in that same response so the system starts fetching. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
+      { role: 'user', content: `[HOTEL_STAGE] All hotel options shown to the traveler across all rounds: ${hotelOptions}. The traveler may use a partial name or misspelling — match to the correct option number using your best judgment. Read their latest message using READING PEOPLE judgment.\n\n- If they picked one — acknowledge warmly, emit [CONFIRM]{"leg":${legIndex},"type":"hotel","option":<option_number_1_to_${allShownHotels.length}>}[/CONFIRM] where the number matches the hotel they chose from the list above, then emit [HOTEL_CONFIRMED].\n- If they want MORE or DIFFERENT hotels — CRITICAL: emit [CHANGE]{"leg":${legIndex},"field":"hotelPreference","value":"<preference or 'more options'>"}[/CHANGE] IN THIS SAME RESPONSE, immediately. Do NOT say "Got it, let me pull up..." or any acknowledgement without also emitting [CHANGE] in the same message. ANY style preference word ("upscale", "cheaper", "boutique", "more central", "different", "more options") means emit [CHANGE] right now. If they stated a preference (e.g. "more upscale", "something with a pool"), use it as the value. If they just want more without specifics, use "more options". You may ask ONE clarifying question ONLY if this is clearly their very first request and they gave absolutely zero indication of what style they want — but if you ask, still emit [CHANGE] in that same response so the system starts fetching. CRITICAL: Never name or invent hotels yourself — always emit [CHANGE] so the system pulls real options from live data.\n- If they're changing GROUP SIZE — emit [CHANGE]{"leg":${legIndex},"field":"groupSize","value":<number>}[/CHANGE].\n- If genuinely undecided, help them decide.` },
     ]
   );
 
@@ -467,7 +470,7 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
   if (chatCleaned) sendFn({ type: 'delta', text: chatCleaned });
 
   // Fallback: if Claude failed to emit [CHANGE] but user clearly wants different options
-  if (!signals.change && !signals.confirm?.option && !signals.confirm?.id && !signals.hotelConfirmed) {
+  if (!signals.change && !signals.confirm?.option && !signals.hotelConfirmed) {
     const userMsg = (messages[messages.length - 1]?.content || '').toLowerCase();
     if (/more|different|other|upscale|luxury|budget|cheap|boutique|upmarket|nicer|fancier|higher.?end|5.?star/i.test(userMsg)) {
       let inferredPref = 'more options';
@@ -541,34 +544,31 @@ async function executeSelectHotel({ model, messages, systemPrompt, sendFn, legIn
     return { modelPatch: { groupSize: newSize, legs: [{ index: legIndex, hotelsBank: [] }] }, continue: true };
   }
 
-  if (!signals.confirm?.option && !signals.confirm?.id && !signals.hotelConfirmed) return { modelPatch: null, continue: false };
+  if (!signals.confirm?.option && !signals.hotelConfirmed) return { modelPatch: null, continue: false };
 
-  const shownBank = leg.hotelShownBank || [];
   const userText = (messages[messages.length - 1]?.content || '').toLowerCase();
   let confirmedHotel = null;
 
-  // Primary: name match in user's message against everything ever shown — catches picks from earlier sets
-  confirmedHotel = shownBank.find(h => h.name && userText.includes(h.name.toLowerCase().split(/\s+/).slice(0, 2).join(' '))) || null;
+  // Primary: Claude's sequential option number — maps directly into allShownHotels
+  if (signals.confirm?.option != null) {
+    const pos = parseInt(signals.confirm.option);
+    console.log(`[select_hotel] Claude emitted option=${pos}, allShownHotels[${pos - 1}] = ${allShownHotels[pos - 1]?.name}`);
+    if (pos >= 1 && pos <= allShownHotels.length) confirmedHotel = allShownHotels[pos - 1] || null;
+  }
 
-  // Secondary: position from [CONFIRM] option field (Claude picks 1, 2, or 3 from currently shown set)
+  // Fallback: name match in user message across all shown rounds
   if (!confirmedHotel) {
-    const pos = parseInt(signals.confirm?.option);
-    if (pos >= 1 && pos <= shown.length) confirmedHotel = shown[pos - 1];
+    confirmedHotel = allShownHotels.find(h => h.name && userText.includes(h.name.toLowerCase().split(/\s+/).slice(0, 2).join(' '))) || null;
   }
 
-  // Tertiary: exact ID match against everything ever shown
-  if (!confirmedHotel && signals.confirm?.id) {
-    confirmedHotel = shownBank.find(h => h.id === signals.confirm.id) || null;
-  }
-
-  // Last resort: ordinal in user message ("the first one", "option 2", etc.) — searches current shown set
+  // Last resort: ordinal in user message ("the first one", "option 2", etc.)
   if (!confirmedHotel) {
     const m = userText.match(/\boption\s*(\d+)\b|\b(first|1st|second|2nd|third|3rd)\b/);
     if (m) {
       const n = m[1] ? parseInt(m[1]) - 1
         : ['first', '1st'].includes(m[2]) ? 0
         : ['second', '2nd'].includes(m[2]) ? 1 : 2;
-      confirmedHotel = shown[n] || null;
+      confirmedHotel = allShownHotels[n] || null;
     }
   }
 
@@ -653,7 +653,10 @@ async function executeConfirmMustSees({ model, messages, systemPrompt, sendFn, l
   );
 
   const signals = extractSignals(chatText);
-  const { cleaned } = extractAndStripBlocks(chatText);
+  // Truncate at the signal — discard anything Claude wrote after [MUST_SEES_CONFIRMED]
+  const signalPos = chatText.indexOf('[MUST_SEES_CONFIRMED]');
+  const textBeforeSignal = signalPos !== -1 ? chatText.slice(0, signalPos) : chatText;
+  const { cleaned } = extractAndStripBlocks(textBeforeSignal);
   if (cleaned) sendFn({ type: 'delta', text: cleaned });
 
   if (!signals.mustSeesConfirmed) return { modelPatch: null, continue: false };
@@ -815,15 +818,15 @@ async function executeSelectActivity({ model, messages, systemPrompt, sendFn, le
 
   let selectedActivities = currentShown;
 
-  // Primary: title match in user message across all ever-shown activities for this type
-  const nameMatch = allShownActivities.find(a => a.title && userMsgText.includes(a.title.toLowerCase().split(/\s+/).slice(0, 3).join(' ')));
-  if (nameMatch) {
-    selectedActivities = [nameMatch];
-  } else if (signals.activitySelected?.ids) {
-    // Secondary: ID match from Claude's signal (Claude now sees all shown, so IDs should be accurate)
+  // Primary: Claude's IDs — Claude sees the full shown bank and resolves partial names/misspellings
+  if (signals.activitySelected?.ids) {
     const idMap = Object.fromEntries(allShownActivities.map(a => [a.id, a]));
     const picked = signals.activitySelected.ids.map(id => idMap[id]).filter(Boolean);
     if (picked.length > 0) selectedActivities = picked;
+  } else {
+    // Fallback: name match when Claude emits no IDs
+    const nameMatches = allShownActivities.filter(a => a.title && userMsgText.includes(a.title.toLowerCase().split(/\s+/).slice(0, 3).join(' ')));
+    if (nameMatches.length > 0) selectedActivities = nameMatches;
   }
 
   const updatedConfirmed = [...(leg.confirmedActivities || []), ...selectedActivities];
