@@ -187,6 +187,73 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
+app.get('/privacy', (req, res) => {
+  res.setHeader('Content-Type', 'text/html')
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy – VOYO</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 720px; margin: 48px auto; padding: 0 24px; color: #1a1a1a; line-height: 1.7; }
+    h1 { font-size: 2rem; margin-bottom: 4px; }
+    .updated { color: #666; font-size: 0.9rem; margin-bottom: 40px; }
+    h2 { font-size: 1.1rem; margin-top: 36px; margin-bottom: 8px; }
+    p, li { font-size: 0.97rem; }
+    ul { padding-left: 20px; }
+    a { color: #4f46e5; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: May 6, 2025</p>
+
+  <p>VOYO ("we", "our", or "us") is a travel planning app. This policy explains what information we collect, how we use it, and your rights.</p>
+
+  <h2>1. Information We Collect</h2>
+  <ul>
+    <li><strong>Account information:</strong> email address and password (stored securely via Supabase Auth).</li>
+    <li><strong>Profile information:</strong> full name, profile photo, age, gender, travel preferences, budget category, travel style, and group size — all provided voluntarily by you.</li>
+    <li><strong>Travel data:</strong> past trip history, planning session conversations, saved itineraries, bookmarked destinations, and manually added trips.</li>
+  </ul>
+
+  <h2>2. How We Use Your Information</h2>
+  <ul>
+    <li>To provide personalised travel recommendations and AI-powered trip planning.</li>
+    <li>To save and sync your trips, sessions, and wishlist across sessions.</li>
+    <li>To improve the quality of recommendations over time.</li>
+  </ul>
+
+  <h2>3. Data Sharing</h2>
+  <p>We do not sell, rent, or share your personal data with third parties for advertising purposes. We use the following services to operate the app:</p>
+  <ul>
+    <li><strong>Supabase</strong> – authentication and database storage.</li>
+    <li><strong>Anthropic</strong> – AI responses to your planning conversations (your messages are sent to Anthropic's API).</li>
+    <li><strong>Pexels / Wikipedia</strong> – destination images (no personal data is shared).</li>
+  </ul>
+
+  <h2>4. Data Retention</h2>
+  <p>Your data is stored for as long as your account is active. You can delete your account and all associated data by contacting us at <a href="mailto:pranavambulkar03@gmail.com">pranavambulkar03@gmail.com</a>.</p>
+
+  <h2>5. Children's Privacy</h2>
+  <p>VOYO is not directed at children under 13. We do not knowingly collect personal information from children under 13.</p>
+
+  <h2>6. Your Rights</h2>
+  <p>You may request access to, correction of, or deletion of your personal data at any time by emailing us at <a href="mailto:pranavambulkar03@gmail.com">pranavambulkar03@gmail.com</a>.</p>
+
+  <h2>7. Security</h2>
+  <p>We use industry-standard measures to protect your data, including encrypted storage and secure authentication via Supabase.</p>
+
+  <h2>8. Changes to This Policy</h2>
+  <p>We may update this policy from time to time. We will notify you of significant changes by updating the date at the top of this page.</p>
+
+  <h2>9. Contact</h2>
+  <p>Questions? Email us at <a href="mailto:pranavambulkar03@gmail.com">pranavambulkar03@gmail.com</a>.</p>
+</body>
+</html>`)
+})
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`)
 })
