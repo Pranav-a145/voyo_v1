@@ -187,6 +187,30 @@ app.post('/api/chat', async (req, res) => {
   }
 })
 
+app.get('/support', (req, res) => {
+  res.setHeader('Content-Type', 'text/html')
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Support – VOYO</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 720px; margin: 48px auto; padding: 0 24px; color: #1a1a1a; line-height: 1.7; }
+    h1 { font-size: 2rem; margin-bottom: 4px; }
+    p { font-size: 0.97rem; }
+    a { color: #4f46e5; }
+  </style>
+</head>
+<body>
+  <h1>Support</h1>
+  <p>Need help with VOYO? Reach out and I'll get back to you as soon as possible.</p>
+  <p>Email: <a href="mailto:pranavambulkar03@gmail.com">pranavambulkar03@gmail.com</a></p>
+  <p>Phone: <a href="tel:+16092136071">609-213-6071</a></p>
+</body>
+</html>`)
+})
+
 app.get('/privacy', (req, res) => {
   res.setHeader('Content-Type', 'text/html')
   res.send(`<!DOCTYPE html>
