@@ -2,11 +2,16 @@ import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
 import Anthropic from '@anthropic-ai/sdk'
+import { createClient } from '@supabase/supabase-js'
 import { executeRequest } from './orchestrator.js'
 
 const app = express()
 const PORT = process.env.PORT || 5000
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const supabaseAdmin = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+)
 
 app.use(cors())
 app.use(express.json({ limit: '10mb' }))
@@ -185,6 +190,22 @@ app.post('/api/chat', async (req, res) => {
       res.end()
     }
   }
+})
+
+app.delete('/api/delete-account', async (req, res) => {
+  const authHeader = req.headers.authorization
+  if (!authHeader?.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' })
+
+  const token = authHeader.slice(7)
+  const { data: { user }, error } = await supabaseAdmin.auth.getUser(token)
+  if (error || !user) return res.status(401).json({ error: 'Invalid token' })
+
+  await supabaseAdmin.from('profiles').delete().eq('id', user.id)
+
+  const { error: deleteError } = await supabaseAdmin.auth.admin.deleteUser(user.id)
+  if (deleteError) return res.status(500).json({ error: 'Failed to delete account' })
+
+  res.json({ success: true })
 })
 
 app.get('/support', (req, res) => {
